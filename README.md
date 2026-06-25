@@ -1,6 +1,11 @@
-[![Join us on Slack chat room](https://img.shields.io/badge/Slack-Join%20the%20chat%20room-orange)](https://join.slack.com/t/panasonic-wemos/shared_invite/enQtODg2MDY0NjE1OTI3LTgzYjkwMzIwNTAwZTMyYzgwNDQ1Y2QxYjkwODg3NjMyN2MyM2ViMDM3Yjc3OGE3MGRiY2FkYzI4MzZiZDVkNGE)
-[![Build binary](https://github.com/the78mole/HeishaMon/actions/workflows/main.yml/badge.svg)](https://github.com/the78mole/HeishaMon/actions/workflows/main.yml)
+This is a fork of https://github.com/heishamon/HeishaMon/tree/main
 
+The goal is to get the code compiling with the latest Arduino ESP32 board package from espressif, and to run on ESP32-S3 boards with octal (OPI) PSRAM, which doesn't work with the original code.
+
+Status: It compiles and runs, but is totally untested, so use it at your own risk.
+
+
+Here's the original readme:
 
 # Panasonic H, J, K & L Series Aquarea air-water heat pump protocol
 
