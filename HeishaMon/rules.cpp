@@ -12,6 +12,9 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
+#ifdef ESP32
+#include <esp_heap_caps.h>
+#endif
 
 #include "src/common/mem.h"
 #include "src/common/stricmp.h"
@@ -902,13 +905,18 @@ void rules_setup(void) {
     if (rule_options.event_cb == NULL) { //check if not initialized before
 #ifdef ESP32
       if (mempool == NULL) { //make sure we only malloc if not done before
-        mempool = (unsigned char *)ps_malloc(MEMPOOL_SIZE);  //in arduino IDE normal malloc causes big block to go to PSRAM if PSRAM is enabled. But seems to be unstable so for now don't enable PSRAM
+        // Keep rules mempool in internal RAM to avoid external-PSRAM instability on some ESP32-S3 configurations.
+        mempool = (unsigned char *)heap_caps_malloc(MEMPOOL_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (mempool == NULL) {
-          logprintln_P(F("Mempool OOM"));
-          OUT_OF_MEMORY
+          logprintln_P(F("Mempool OOM (internal RAM), rules disabled"));
+          return;
         }
       }
 #endif  
+    if (mempool == NULL) {
+      logprintln_P(F("Mempool unavailable, rules disabled"));
+      return;
+    }
     memset(mempool, 0, MEMPOOL_SIZE);
 
     logprintf_P(F("rules mempool size: %d"), MEMPOOL_SIZE);
@@ -940,6 +948,11 @@ bool existsRulesFile(char *file) {
 int rules_parse(char *file) {
   if (existsRulesFile(file)) { //only parse an existing and not empty, file
     rules_setup(); //check there if done already
+
+    if (mempool == NULL) {
+      logprintln_P(F("Rules parser unavailable: mempool not initialized"));
+      return -1;
+    }
 	
     File frules = LittleFS.open(file, "r");
     parsing = 1;

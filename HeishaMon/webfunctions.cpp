@@ -131,14 +131,49 @@ void ntp_dns_found(const char *name, const ip4_addr *addr, void *arg) {
 }
 #elif defined(ESP32)
 void ntp_dns_found(const char *name, const ip_addr_t *addr, void *arg) {
-  sntp_stop();
+  // ESP32 core 3.x may assert if sntp_stop is called without TCPIP core lock.
+  // Keep callback minimal; ESP32 uses configTzTime in ntpReload.
   sntp_setserver(ntpservers++, addr);
-  sntp_init();
 }
 #endif
 
 
 void ntpReload(settingsStruct *heishamonSettings) {
+#if defined(ESP32)
+  tzStruct tzCfg;
+  memcpy_P(&tzCfg, &tzdata[heishamonSettings->timezone], sizeof(tzCfg));
+  setenv("TZ", tzCfg.value, 1);
+  tzset();
+
+  // Parse comma-separated NTP server list and pass up to 3 servers to configTzTime.
+  char ntpList[sizeof(heishamonSettings->ntp_servers)];
+  strlcpy(ntpList, heishamonSettings->ntp_servers, sizeof(ntpList));
+
+  char *servers[3] = { NULL, NULL, NULL };
+  uint8_t count = 0;
+  char *token = strtok(ntpList, ",");
+  while (token != NULL && count < 3) {
+    while (*token == ' ') {
+      token++;
+    }
+    if (*token != '\0') {
+      servers[count++] = token;
+    }
+    token = strtok(NULL, ",");
+  }
+
+  if (count == 0) {
+    configTzTime(tzCfg.value, "pool.ntp.org");
+  } else if (count == 1) {
+    configTzTime(tzCfg.value, servers[0]);
+  } else if (count == 2) {
+    configTzTime(tzCfg.value, servers[0], servers[1]);
+  } else {
+    configTzTime(tzCfg.value, servers[0], servers[1], servers[2]);
+  }
+  return;
+#endif
+
   ip_addr_t addr;
   uint8_t len = strlen(heishamonSettings->ntp_servers);
   uint8_t ptr = 0, i = 0;

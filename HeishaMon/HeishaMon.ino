@@ -19,7 +19,10 @@
   #define PROXYTX 8
   #define ENABLEPIN 5
   #define ENABLEOTPIN 4
-  #define LEDPIN 42
+  #ifndef HEISHAMON_LED_PIN
+    #define HEISHAMON_LED_PIN 42
+  #endif
+  #define LEDPIN HEISHAMON_LED_PIN
   #define BOOTPIN 0
 #include <WiFi.h>
 #include <ESPmDNS.h>
@@ -167,12 +170,17 @@ int timerqueue_size = 0;
 #define ETH_IRQ          15
 #define ETH_RST          14
 
+#ifndef HEISHAMON_ENABLE_W5500
+#define HEISHAMON_ENABLE_W5500 0
+#endif
+
 // SPI pins
 #define ETH_SPI_SCK     12
 #define ETH_SPI_MISO    13
 #define ETH_SPI_MOSI    11
 
 void setupETH() {
+#if HEISHAMON_ENABLE_W5500
   SPI.begin(ETH_SPI_SCK, ETH_SPI_MISO, ETH_SPI_MOSI);
   if (ETH.begin(ETH_TYPE, ETH_ADDR, ETH_CS, ETH_IRQ, ETH_RST, SPI)) {
     //sethostname on ESP32 after eth.begin (!! for wifi is most be before...!!)
@@ -180,6 +188,9 @@ void setupETH() {
   } else {
     loggingSerial.println("Could not start ethernet. No ethernet module installed?");
   }
+#else
+  loggingSerial.println("Ethernet init skipped (HEISHAMON_ENABLE_W5500=0)");
+#endif
 }
 #endif
 
@@ -1758,6 +1769,13 @@ void setup() {
   loggingSerial.println(F("--- HEISHAMON ---"));
   loggingSerial.println(F("starting..."));
 
+#if defined(ESP32)
+  loggingSerial.printf("ESP32 PSRAM available: %s, size: %u bytes, free: %u bytes\n",
+                       psramFound() ? "yes" : "no",
+                       ESP.getPsramSize(),
+                       ESP.getFreePsram());
+#endif
+
   //first boot check, to visually confirm good flash
   //this also formats the littlefs if necessary
 #if defined(ESP8266)
@@ -1828,9 +1846,13 @@ void setup() {
   setupHttp();
 
   loggingSerial.println(F("Setup SNTP..."));
+#if defined(ESP8266)
   sntp_stop();
   sntp_setoperatingmode(SNTP_OPMODE_POLL);
   sntp_init();
+#else
+  loggingSerial.println(F("SNTP setup deferred until network is up"));
+#endif
 
   loggingSerial.println(F("Setup MQTT..."));
   setupMqtt();
@@ -1839,7 +1861,12 @@ void setup() {
   switchSerial(); //switch serial to gpio13/gpio15
 
   loggingSerial.println(F("Sending new wifi diag..."));
+#if defined(ESP8266)
   WiFi.printDiag(loggingSerial);
+#elif defined(ESP32)
+  // Avoid verbose printDiag here on ESP32-S3 core 3.x; keep startup log lightweight.
+  loggingSerial.printf("Mode: %d, AP stations: %d\n", WiFi.getMode(), WiFi.softAPgetStationNum());
+#endif
 
   loggingSerial.println(F("Settings conditionals..."));
   setupConditionals(); //setup for routines based on settings

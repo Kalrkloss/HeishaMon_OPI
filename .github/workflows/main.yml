@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 env:
-  ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: "http://arduino.esp8266.com/stable/package_esp8266com_index.json https://espressif.github.io/arduino-esp32/package_esp32_dev_index.json"
+  ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: "http://arduino.esp8266.com/stable/package_esp8266com_index.json https://espressif.github.io/arduino-esp32/package_esp32_index.json"
 
 jobs:
   build:
@@ -55,15 +55,10 @@ jobs:
         run: |
           arduino-cli core update-index
           arduino-cli core install esp8266:esp8266
-          arduino-cli core install esp32:esp32@3.0.7
+          arduino-cli core install esp32:esp32
 
       - name: Install dependencies
         run: arduino-cli lib install ringbuffer pubsubclient arduinojson dallastemperature onewire "Adafruit NeoPixel"
-
-      - name: Fix Onewire lib for ESP32-3.0.0
-        run: |
-          sed -i '/#include <driver\/rtc_io\.h>/a\ #include <soc\/gpio_struct\.h>' \
-            /home/runner/Arduino/libraries/OneWire/util/OneWire_direct_gpio.h
 
       - name: Compile Sketch for ESP8266
         run: cd HeishaMon && arduino-cli compile --output-dir . --fqbn=esp8266:esp8266:d1_mini:xtal=160,vt=flash,ssl=basic,mmu=3216,non32xfer=fast,eesz=4M2M,ip=lm2f,dbg=Disabled,lvl=None____,wipe=none,baud=921600 --warnings=none --verbose HeishaMon.ino
@@ -72,7 +67,8 @@ jobs:
         run: |
           cd HeishaMon
           MD5=`md5sum HeishaMon.ino.bin | cut -d\  -f1`
-          mv HeishaMon.ino.bin HeishaMon_ESP8266-${{ env.BUILD_TYPE }}-$MD5.bin
+          FQBN='esp8266:esp8266:d1_mini:xtal=160,vt=flash,ssl=basic,mmu=3216,non32xfer=fast,eesz=4M2M,ip=lm2f,dbg=Disabled,lvl=None____,wipe=none,baud=921600'
+          mv HeishaMon.ino.bin "HeishaMon_ESP8266-${{ env.BUILD_TYPE }}-$MD5__FQBN-${FQBN}.bin"
         shell: bash
 
       - name: Compile Sketch for ESP32
@@ -82,7 +78,22 @@ jobs:
         run: |
           cd HeishaMon
           MD5=`md5sum HeishaMon.ino.bin | cut -d\  -f1`
-          mv HeishaMon.ino.bin HeishaMon_ESP32-${{ env.BUILD_TYPE }}-$MD5.bin
+          FQBN='esp32:esp32:esp32s3:CDCOnBoot=cdc,PSRAM=enabled,PartitionScheme=min_spiffs'
+          mv HeishaMon.ino.bin "HeishaMon_ESP32-${{ env.BUILD_TYPE }}-$MD5__FQBN-${FQBN}.bin"
+        shell: bash
+
+      - name: Compile Sketch for ESP32-S3 16MB QSPI + OPI
+        run: |
+          cp HeishaMon/partitions_16m_opi.csv HeishaMon/partitions.csv
+          cd HeishaMon && arduino-cli compile --output-dir . --fqbn=esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=custom --warnings=none --verbose HeishaMon.ino
+          rm -f partitions.csv
+
+      - name: Add MD5 checksum to ESP32-S3 16MB QSPI + OPI binary
+        run: |
+          cd HeishaMon
+          MD5=`md5sum HeishaMon.ino.bin | cut -d\  -f1`
+          FQBN='esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashMode=qio,FlashSize=16M,PSRAM=opi,PartitionScheme=custom'
+          mv HeishaMon.ino.bin "HeishaMon_ESP32S3_16M_OPI-${{ env.BUILD_TYPE }}-$MD5__FQBN-${FQBN}.bin"
         shell: bash
 
       - name: Upload artifacts
