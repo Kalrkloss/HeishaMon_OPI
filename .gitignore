@@ -15,3 +15,11 @@ firmware.asm
 *.elf
 
 binaries/prepare_release.bat
+
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+

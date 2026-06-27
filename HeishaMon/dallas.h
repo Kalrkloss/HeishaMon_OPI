@@ -7,7 +7,7 @@
 #include "src/common/webserver.h"
 
 #define MAX_DALLAS_SENSORS 15
-#if defined(ESP8266)
+#if 0
 #define ONE_WIRE_BUS 4
 #elif defined(ESP32)
 #define ONE_WIRE_BUS 3

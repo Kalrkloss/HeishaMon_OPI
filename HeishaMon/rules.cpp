@@ -81,10 +81,10 @@ typedef struct varstack_t {
 
 static struct varstack_t global_varstack = { .array = NULL, .nr = 0 };
 
-#if defined(ESP8266)
+#ifdef ESP32
+unsigned char *mempool = NULL; // malloc in runtime
+#else
 unsigned char *mempool = (unsigned char *)MMU_SEC_HEAP;
-#elif defined(ESP32)
-unsigned char *mempool; //malloc in runtime
 #endif
 unsigned int memptr = 0;
 
@@ -830,28 +830,28 @@ static void rules_print_stack(struct varstack_t *table) {
       array = &table->array[x];
       switch(array->type) {
         case VINTEGER: {
-#if defined(ESP8266) || defined(ESP32)
+#if defined(ESP32)
           logprintf_P(F("%2d %s = %d"), x, array->key, array->val.i);
 #else
           printf("%2d %s = %d\n", x, array->key, array->val.i);
 #endif
         } break;
         case VFLOAT: {
-#if defined(ESP8266) || defined(ESP32)
+#if defined(ESP32)
           logprintf_P(F("%2d %s = %g"), x, array->key, array->val.f);
 #else
           printf("%2d %s = %g\n", x, array->key, array->val.f);
 #endif
         } break;
         case VCHAR: {
-#if defined(ESP8266) || defined(ESP32)
+#if defined(ESP32)
           logprintf_P(F("%2d %s = %s"), x, array->key, array->val.s);
 #else
           printf("%2d %s = %s\n", x, array->key, array->val.s);
 #endif
         } break;
         case VNULL: {
-#if defined(ESP8266) || defined(ESP32)
+#if defined(ESP32)
           logprintf_P(F("%d %s = NULL"), x, array->key);
 #else
           printf("%2d %s = NULL\n", x, array->key);

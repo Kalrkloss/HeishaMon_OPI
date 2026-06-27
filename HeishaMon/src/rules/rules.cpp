@@ -7,7 +7,8 @@
 */
 
 #if defined(ESP8266) || defined(ESP32)
-  #pragma GCC diagnostic warning "-fpermissive"
+  #pragma GCC diagnostic ignored "-Wjump-misses-init"
+  #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 
 #if !defined(ESP8266) && !defined(ESP32)
@@ -4280,6 +4281,7 @@ static int16_t rule_create(char **text, struct rules_t *obj) {
 int8_t rule_run(struct rules_t *obj, uint8_t validate) {
   uint16_t pos = 0;
   uint8_t t = 0;
+
 
   /*
    * This approach is much faster than a switch

@@ -6,7 +6,7 @@
   file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
-#ifdef ESP8266
+#if 0
   #pragma GCC diagnostic warning "-fpermissive"
 #endif
 

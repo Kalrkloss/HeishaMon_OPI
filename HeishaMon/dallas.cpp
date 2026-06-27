@@ -1,6 +1,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <PubSubClient.h>
+#include <memory>
 #include "commands.h"
 #include "dallas.h"
 #include "rules.h"

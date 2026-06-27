@@ -5,9 +5,9 @@
 #include "src/common/webserver.h"
 
 // opentherm
-#if defined(ESP8266)
-#define inOTPin 3 //RX pin from ESP8266
-#define outOTPin 1 //TX pin from ESP8266
+#if 0
+#define inOTPin 3 //RX pin from ESP32
+#define outOTPin 1 //TX pin from ESP32
 #elif defined(ESP32)
 #define inOTPin 6
 #define outOTPin 7

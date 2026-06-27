@@ -1,0 +1,67 @@
+# List all source files from the existing HeishaMon/ directory
+set(HEISHAMON_SRCS
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/commands.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/decode.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/dallas.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/gpio.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/rules.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/s0.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/webfunctions.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/HeishaOT.cpp"
+)
+
+set(COMMON_SRCS
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/base64.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/log.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/mem.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/sha1.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/stricmp.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/strncasestr.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/strnicmp.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/strnstr.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/timerqueue.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/uint32float.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common/webserver.cpp"
+)
+
+set(RULES_SRCS
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/function.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/operator.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/rules.cpp"
+)
+
+set(OPENTHERM_SRCS
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/opentherm/opentherm.cpp"
+)
+
+idf_component_register(
+    SRCS
+        main.cpp
+        ${HEISHAMON_SRCS}
+        ${COMMON_SRCS}
+        ${RULES_SRCS}
+        ${OPENTHERM_SRCS}
+    INCLUDE_DIRS
+        .
+        "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon"
+        "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/common"
+        "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules"
+        "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/opentherm"
+    REQUIRES
+        arduino_compat
+        pubsubclient
+        freertos
+        esp_system
+        esp_event
+        esp_wifi
+        esp_netif
+        lwip
+        nvs_flash
+        driver
+        esp_timer
+        newlib
+        cxx
+        json
+        spi_flash
+        esp_psram
+)

@@ -12,13 +12,14 @@
 
 #include <ArduinoJson.h>          //https://github.com/bblanchon/ArduinoJson
 #include <time.h>
+#include <memory>
 
 #define UPTIME_OVERFLOW 4294967295 // Uptime overflow value
 
 static uint8_t ntpservers = 0;
 
 void log_message(char* string);
-void log_message(const __FlashStringHelper *msg);
+void log_message(const char *msg);
 
 int dBmToQuality(int dBm) {
   if (dBm == 31)
@@ -627,24 +628,24 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
 
   settingsToJson(jsonDoc, heishamonSettings); //stores current settings in a json document
 
-  jsonDoc[F("force_rules")] = String("disabled");
-  jsonDoc[F("hotspot")] = String("disabled");
-  jsonDoc[F("listenonly")] = String("disabled");
-  jsonDoc[F("logMqtt")] = String("disabled");
-  jsonDoc[F("logHexdump")] = String("disabled");
-  jsonDoc[F("logSerial1")] = String("disabled");
-  jsonDoc[F("optionalPCB")] = String("disabled");
-  jsonDoc[F("opentherm")] = String("disabled");
+  jsonDoc["force_rules"] = "disabled";
+  jsonDoc["hotspot"] = "disabled";
+  jsonDoc["listenonly"] = "disabled";
+  jsonDoc["logMqtt"] = "disabled";
+  jsonDoc["logHexdump"] = "disabled";
+  jsonDoc["logSerial1"] = "disabled";
+  jsonDoc["optionalPCB"] = "disabled";
+  jsonDoc["opentherm"] = "disabled";
 
 #ifdef ESP32  
-  jsonDoc[F("proxy")] = String("disabled");
+  jsonDoc["proxy"] = "disabled";
 #endif  
 #ifdef TLS_SUPPORT
-  jsonDoc[F("mqtt_tls_enabled")] = String("disabled");
+  jsonDoc["mqtt_tls_enabled"] = "disabled";
 #endif
 
-  jsonDoc[F("use_1wire")] = String("disabled");
-  jsonDoc[F("use_s0")] = String("disabled");
+  jsonDoc["use_1wire"] = "disabled";
+  jsonDoc["use_s0"] = "disabled";
 
   struct websettings_t *tmp = (struct websettings_t *)client->userdata;
   while (tmp) {

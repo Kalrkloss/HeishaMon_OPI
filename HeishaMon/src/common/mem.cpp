@@ -7,7 +7,7 @@
 */
 
 unsigned int alignedbuffer(int v) {
-#if defined(ESP8266)
+#if 0
   return (v + 3) & ~0x3;
 #else
   return v;

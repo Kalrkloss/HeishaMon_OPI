@@ -1,5 +1,5 @@
 /*
-  OpenTherm.cpp - OpenTherm Communication Library For Arduino, ESP8266
+  OpenTherm.cpp - OpenTherm Communication Library For Arduino, ESP32
   Copyright 2018, Ihor Melnyk
 */
 
@@ -206,7 +206,7 @@ void OpenTherm::process() {
     setIdleState();
     smartPowerState = LOW_POWER;
     smartPowerEnabled = false;
-    OpenThermStatus::NOT_INITIALIZED;
+    st = OpenThermStatus::NOT_INITIALIZED;
   }
 
   if (st == OpenThermStatus::READY) return;

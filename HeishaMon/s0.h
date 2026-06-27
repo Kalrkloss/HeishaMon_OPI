@@ -2,7 +2,7 @@
 #include "src/common/webserver.h"
 
 #define NUM_S0_COUNTERS 2
-#if defined(ESP8266)
+#if 0
 #define DEFAULT_S0_PIN_1 12 
 #define DEFAULT_S0_PIN_2 14 
 #elif defined(ESP32)

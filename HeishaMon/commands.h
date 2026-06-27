@@ -1,5 +1,4 @@
-#define LWIP_INTERNAL
-
+#include <Arduino.h>
 #include <ArduinoJson.h>
 
 #define DATASIZE 203

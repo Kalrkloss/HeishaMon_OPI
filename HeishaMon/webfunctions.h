@@ -1,9 +1,4 @@
-#define LWIP_INTERNAL
-
-#if defined(ESP8266)
-#include <ESP8266WiFi.h>
-#include <ESP8266WiFiGratuitous.h>
-#elif defined(ESP32)
+#if defined(ESP32)
 #include <WiFi.h>
 #include <ETH.h>
 #include <SPI.h>

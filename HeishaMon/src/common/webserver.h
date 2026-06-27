@@ -21,7 +21,7 @@
   #ifdef ESP8266
     #define WEBSERVER_BUFFER_SIZE 128
   #else
-	#define WEBSERVER_BUFFER_SIZE 512  
+    #define WEBSERVER_BUFFER_SIZE 512
   #endif
 #endif
 
@@ -58,7 +58,8 @@
   #define err_t uint8_t
 #endif
 
-#if !defined(ESP8266) && !defined(ESP32)
+/* LWIP types are provided by the ESP32 core headers; only define a minimal compatibility shim when building outside the embedded environment. */
+#if !defined(ESP32) && !defined(ESP8266)
 typedef struct tcp_pcb {
 } tcp_pcb;
 
@@ -105,8 +106,9 @@ struct WiFiClient {
   void (*stop)();
   int (*read)(uint8_t *buffer, int size);
 };
-  #define PGM_P unsigned char *
 #endif
+
+#define PGM_P const char *
 
 typedef struct webserver_t {
   tcp_pcb *pcb;

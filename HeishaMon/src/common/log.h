@@ -18,7 +18,7 @@
 
 void _logprintln(const char *file, unsigned int line, char *msg);
 void _logprintf(const char *file, unsigned int line, char *fmt, ...);
-void _logprintln_P(const char *file, unsigned int line, const __FlashStringHelper *msg);
-void _logprintf_P(const char *file, unsigned int line, const __FlashStringHelper *fmt, ...);
+void _logprintln_P(const char *file, unsigned int line, const char *msg);
+void _logprintf_P(const char *file, unsigned int line, const char *fmt, ...);
 
 #endif

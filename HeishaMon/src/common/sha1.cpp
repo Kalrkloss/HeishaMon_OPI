@@ -193,8 +193,8 @@ sha1digest(uint8_t *digest, char *hexdigest, const uint8_t *data, size_t databyt
   /* Store hex version of digest in supplied buffer */
   if (hexdigest)
   {
-    snprintf (hexdigest, 41, "%08x%08x%08x%08x%08x",
-              H[0],H[1],H[2],H[3],H[4]);
+    snprintf (hexdigest, 41, "%08lx%08lx%08lx%08lx%08lx",
+              (unsigned long)H[0],(unsigned long)H[1],(unsigned long)H[2],(unsigned long)H[3],(unsigned long)H[4]);
   }
 
   return 0;

@@ -21,7 +21,7 @@ extern const char* mqtt_logtopic;
 
 void _logprintln(const char *file, unsigned int line, char *msg) {
   if(heishamonSettings.logSerial1) {
-#if defined(ESP8266)
+#if 0
     Serial1.print(millis());
     Serial1.print(": ");
     Serial1.println(msg);
@@ -56,7 +56,7 @@ void _logprintf(const char *file, unsigned int line, char *fmt, ...) {
   FREE(str);
 }
 
-void _logprintln_P(const char *file, unsigned int line, const __FlashStringHelper *msg) {
+void _logprintln_P(const char *file, unsigned int line, const char *msg) {
   PGM_P p = (PGM_P)msg;
   int len = strlen_P((const char *)p);
   char *str = (char *)MALLOC(len+1);
@@ -70,7 +70,7 @@ void _logprintln_P(const char *file, unsigned int line, const __FlashStringHelpe
   FREE(str);
 }
 
-void _logprintf_P(const char *file, unsigned int line, const __FlashStringHelper *fmt, ...) {
+void _logprintf_P(const char *file, unsigned int line, const char *fmt, ...) {
   PGM_P p = (PGM_P)fmt;
   int len = strlen_P((const char *)p);
   char *foo = (char *)MALLOC(len+1);

@@ -1,5 +1,5 @@
 /*
-  OpenTherm.h - OpenTherm Library for the ESP8266/Arduino platform
+  OpenTherm.h - OpenTherm Library for the ESP32/Arduino platform
   https://github.com/ihormelnyk/OpenTherm
   http://ihormelnyk.com/pages/OpenTherm
   Licensed under MIT license

@@ -6,7 +6,7 @@
   file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
-#if defined(ESP8266) || defined(ESP32)
+#if defined(ESP32)
   #include <Arduino.h>
 #endif
 
@@ -24,12 +24,16 @@ static unsigned int lasttime = 0;
 static unsigned int *calls = NULL;
 static unsigned int nrcalls = 0;
 
-#if !defined(ESP8266) && !defined(ESP32)
-static unsigned int micros() {
+#if defined(ESP32) || defined(ESP8266)
+static unsigned long timerqueue_micros() {
+  return micros();
+}
+#else
+static unsigned long timerqueue_micros() {
   struct timeval tv;
-  gettimeofday(&tv,NULL);
+  gettimeofday(&tv, NULL);
 
-  return 1000000 * tv.tv_sec + tv.tv_usec;;
+  return 1000000UL * tv.tv_sec + tv.tv_usec;
 }
 #endif
 
@@ -66,7 +70,7 @@ struct timerqueue_t *timerqueue_pop() {
     timerqueue = NULL;
   } else {
     if((timerqueue = (struct timerqueue_t **)realloc(timerqueue, sizeof(struct timerqueue_t *)*timerqueue_size)) == NULL) {
-  #if defined(ESP8266) || defined(ESP32)
+  #if defined(ESP32)
       //loggingSerial.printf("Out of memory %s:#%d\n", __FUNCTION__, __LINE__);
       ESP.restart();
       exit(-1);
@@ -143,7 +147,7 @@ void timerqueue_insert(int sec, int usec, int nr) {
   }
 
   if((timerqueue = (struct timerqueue_t **)realloc(timerqueue, sizeof(struct timerqueue_t *)*(timerqueue_size+1))) == NULL) {
-#if defined(ESP8266) || defined(ESP32)
+#if defined(ESP32)
     //loggingSerial.printf("Out of memory %s:#%d\n", __FUNCTION__, __LINE__);
     ESP.restart();
     exit(-1);
@@ -155,7 +159,7 @@ void timerqueue_insert(int sec, int usec, int nr) {
 
   node = (struct timerqueue_t *)malloc(sizeof(struct timerqueue_t));
   if(node == NULL) {
-#if defined(ESP8266) || defined(ESP32)
+#if defined(ESP32)
     //loggingSerial.printf("Out of memory %s:#%d\n", __FUNCTION__, __LINE__);
     ESP.restart();
     exit(-1);
@@ -177,7 +181,7 @@ void timerqueue_update(void) {
   struct timeval tv;
   unsigned int curtime = 0;
 
-  curtime = micros();
+  curtime = (unsigned int)timerqueue_micros();
 
   unsigned int diff = curtime - lasttime;
   unsigned int sec = diff / 1000000;
@@ -197,7 +201,7 @@ void timerqueue_update(void) {
     if(timerqueue[a]->sec < 0 || (timerqueue[a]->sec == 0 && timerqueue[a]->usec <= 0)) {
       int nr = timerqueue[a]->nr;
       if((calls = (unsigned int *)realloc(calls, (nrcalls+1)*sizeof(unsigned int))) == NULL) {
-#if defined(ESP8266) || defined(ESP32)
+#if defined(ESP32)
         ///loggingSerial.printf("Out of memory %s:#%d\n", __FUNCTION__, __LINE__);
         ESP.restart();
         exit(-1);

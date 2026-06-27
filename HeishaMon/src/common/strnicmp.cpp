@@ -12,7 +12,7 @@
 
 #include "../rules/rules.h"
 
-#ifdef ESP8266
+#if 0
 #include <Arduino.h>
 #endif
 

@@ -20,7 +20,7 @@
   #define ENABLEPIN 5
   #define ENABLEOTPIN 4
   #ifndef HEISHAMON_LED_PIN
-    #define HEISHAMON_LED_PIN 42
+    #define HEISHAMON_LED_PIN 48
   #endif
   #define LEDPIN HEISHAMON_LED_PIN
   #define BOOTPIN 0
