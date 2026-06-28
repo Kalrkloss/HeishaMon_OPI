@@ -4,6 +4,8 @@
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_psram.h"
+#include "esp_ota_ops.h"
+#include "esp_flash.h"
 
 inline bool psramFound() { return esp_psram_is_initialized(); }
 
@@ -27,9 +29,16 @@ public:
     }
     uint32_t getFreePsram() { return heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
 
-    uint32_t getFlashChipRealSize() { return 0; }
-    uint32_t getFlashChipSize() { return 0; }
-    uint32_t getFreeSketchSpace() { return 0; }
+    uint32_t getFlashChipRealSize() {
+        uint32_t size = 0;
+        esp_flash_get_size(NULL, &size);
+        return size;
+    }
+    uint32_t getFlashChipSize() { return getFlashChipRealSize(); }
+    uint32_t getFreeSketchSpace() {
+        const esp_partition_t* part = esp_ota_get_next_update_partition(NULL);
+        return part ? part->size : 0;
+    }
 
     rst_info* getResetInfoPtr() { return &reset_info_; }
 

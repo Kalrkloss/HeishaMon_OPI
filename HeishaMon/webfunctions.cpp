@@ -16,11 +16,17 @@
 
 #define UPTIME_OVERFLOW 4294967295 // Uptime overflow value
 
-static uint8_t ntpservers = 0;
-
 void log_message(char* string);
 void log_message(const char *msg);
 
+/*
+ * dBmToQuality -- Convert WiFi RSSI (dBm) to a 0-100% quality percentage.
+ *   dBm == 31   -> -1 (invalid / not connected)
+ *   dBm <= -100 ->   0 (worst)
+ *   dBm >= -50  -> 100 (best)
+ *   Otherwise   -> linear mapping: 2 * (dBm + 100)
+ * Thread-safety: Reentrant (pure function, no shared state).
+ */
 int dBmToQuality(int dBm) {
   if (dBm == 31)
     return -1;
@@ -32,6 +38,14 @@ int dBmToQuality(int dBm) {
 }
 
 
+/*
+ * getWifiScanResults -- Sort discovered WiFi networks by RSSI (descending),
+ *   remove duplicate SSIDs, serialize the deduplicated list as JSON to
+ *   "/wifiscan.json" on LittleFS, then call WiFi.scanDelete().
+ *   Called after a background scan completes.
+ * Thread-safety: Must not be called concurrently with other LittleFS writes.
+ *   Accesses WiFi scan results which are valid only until scanDelete().
+ */
 void getWifiScanResults(int numSsid) {
   if (numSsid > 0) { //found wifi networks
     int indexes[numSsid];
@@ -73,30 +87,42 @@ void getWifiScanResults(int numSsid) {
   }
 }
 
+/*
+ * getWifiQuality -- Return the current WiFi connection quality (0-100%),
+ *   or -1 if not connected to any AP.  Delegates to dBmToQuality().
+ * Thread-safety: Reentrant (only reads WiFi.status() / WiFi.RSSI()).
+ */
 int getWifiQuality() {
   if (WiFi.status() != WL_CONNECTED)
     return -1;
   return dBmToQuality(WiFi.RSSI());
 }
 
+/*
+ * getFreeMemory -- Return free heap memory as a percentage of total heap.
+ *   Total heap is captured once on the first call (static cache).
+ * Thread-safety: The static total_memory is written once and read-only
+ *   afterwards; ESP.getFreeHeap() is safe to call from any context.
+ */
 int getFreeMemory() {
-  //store total memory at boot time
-  static uint32_t total_memory = 0;  
-#if defined(ESP8266)
-  if ( 0 == total_memory ) total_memory = ESP.getFreeHeap();
-#else
-  //on esp32 we have the total heap size
+  static uint32_t total_memory = 0;  // Cached total heap size, set on first call  
   if ( 0 == total_memory ) total_memory = ESP.getHeapSize();
-#endif
 
   uint32_t free_memory   = ESP.getFreeHeap();
   return (100 * free_memory / total_memory ) ; // as a %
 }
 
-// returns system uptime in seconds
+/*
+ * getUptime -- Return a human-readable uptime string ("X day(s) Y hour(s) ...").
+ *   Handles millis() rollover (~49.7 days) by counting overflows via a static
+ *   counter.  Allocates a heap buffer that the caller must free.
+ * Thread-safety: NOT reentrant.  The static variables (last_uptime,
+ *   uptime_overflows) are shared state.  If called from multiple tasks
+ *   the uptime may be momentarily inconsistent (benign for display).
+ */
 char *getUptime(void) {
-  static uint32_t last_uptime      = 0;
-  static uint8_t  uptime_overflows = 0;
+  static uint32_t last_uptime      = 0;  // Previous millis() value, used to detect rollover
+  static uint8_t  uptime_overflows = 0;  // Number of times millis() wrapped around
 
   if (millis() < last_uptime) {
     ++uptime_overflows;
@@ -124,23 +150,17 @@ char *getUptime(void) {
   return str;
 }
 
-#if defined(ESP8266)
-void ntp_dns_found(const char *name, const ip4_addr *addr, void *arg) {
-  sntp_stop();
-  sntp_setserver(ntpservers++, addr);
-  sntp_init();
-}
-#elif defined(ESP32)
-void ntp_dns_found(const char *name, const ip_addr_t *addr, void *arg) {
-  // ESP32 core 3.x may assert if sntp_stop is called without TCPIP core lock.
-  // Keep callback minimal; ESP32 uses configTzTime in ntpReload.
-  sntp_setserver(ntpservers++, addr);
-}
-#endif
 
 
+/*
+ * ntpReload -- Configure timezone and NTP servers from the current settings.
+ *   Parses the comma-separated NTP server list (up to 3 servers) and calls
+ *   configTzTime().  Falls back to "pool.ntp.org" if the list is empty.
+ * Thread-safety: Modifies global timezone state (setenv/tzset/configTzTime).
+ *   Should only be called from the main setup / settings-save path, not
+ *   concurrently.
+ */
 void ntpReload(settingsStruct *heishamonSettings) {
-#if defined(ESP32)
   tzStruct tzCfg;
   memcpy_P(&tzCfg, &tzdata[heishamonSettings->timezone], sizeof(tzCfg));
   setenv("TZ", tzCfg.value, 1);
@@ -172,52 +192,19 @@ void ntpReload(settingsStruct *heishamonSettings) {
   } else {
     configTzTime(tzCfg.value, servers[0], servers[1], servers[2]);
   }
-  return;
-#endif
-
-  ip_addr_t addr;
-  uint8_t len = strlen(heishamonSettings->ntp_servers);
-  uint8_t ptr = 0, i = 0;
-  ntpservers = 0;
-  for (i = 0; i <= len; i++) {
-    if (heishamonSettings->ntp_servers[i] == ',') {
-      heishamonSettings->ntp_servers[i] = 0;
-
-      uint8_t err = dns_gethostbyname(&heishamonSettings->ntp_servers[ptr], &addr, ntp_dns_found, 0);
-      if (err == ERR_OK) {
-        sntp_stop();
-        sntp_setserver(ntpservers++, &addr);
-        sntp_init();
-      }
-      heishamonSettings->ntp_servers[i++] = ',';
-      while (heishamonSettings->ntp_servers[i] == ' ') {
-        i++;
-      }
-      ptr = i;
-    }
-  }
-
-  uint8_t err = dns_gethostbyname(&heishamonSettings->ntp_servers[ptr], &addr, ntp_dns_found, 0);
-  if (err == ERR_OK) {
-    sntp_stop();
-    sntp_setserver(ntpservers++, &addr);
-    sntp_init();
-  }
-
-  sntp_stop();
-  tzStruct tz;
-  memcpy_P(&tz, &tzdata[heishamonSettings->timezone], sizeof(tz));
-#if defined(ESP8266)
-  setTZ(tz.value);
-#elif defined(ESP32)
-  setenv("TZ",tz.value,1);
-  tzset();
-#endif
-  sntp_init();
 }
 
+/*
+ * loadSettings -- Read and parse "/config.json" from LittleFS into the
+ *   provided settingsStruct.  Each field is validated (bounds checks on
+ *   waitTime, dallasResolution, etc.).  If the file is missing or corrupt
+ *   the WiFi persistent credentials are cleared (forcing config reset).
+ *   On success ntpReload() is called to apply timezone / NTP changes.
+ * Thread-safety: NOT reentrant.  Accesses LittleFS and modifies the
+ *   settingsStruct in place.  Must not be called concurrently with any
+ *   other LittleFS operation.
+ */
 void loadSettings(settingsStruct *heishamonSettings) {
-  //read configuration from FS json
   log_message(_F("mounting FS..."));
 
   if (LittleFS.begin()) {
@@ -311,40 +298,18 @@ void loadSettings(settingsStruct *heishamonSettings) {
 
 }
 
+/*
+ * setupWifi -- Configure and connect WiFi in AP+STA mode.
+ *   - Disables modem sleep, sets hostname (from settings or "HeishaMon").
+ *   - Uses WIFI_ALL_CHANNEL_SCAN to pick the best AP for the configured SSID.
+ *   - If SSID is empty and hotspot mode is enabled, starts a soft-AP
+ *     "HeishaMon-Setup" at address 192.168.4.1.
+ *   - If SSID is set but password is empty, connects with open (no password).
+ * Thread-safety: Must be called from the main loop / setup context only.
+ *   Modifies global WiFi state.  Not safe from multiple tasks.
+ */
 void setupWifi(settingsStruct *heishamonSettings) {
   log_message(_F("Wifi reconnecting with new configuration..."));
-#if defined(ESP8266)
-  //no sleep wifi
-  WiFi.setSleepMode(WIFI_NONE_SLEEP);
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.disconnect(true);
-  WiFi.softAPdisconnect(true);
-
-  if (heishamonSettings->wifi_ssid[0] != '\0') {
-    log_message(_F("Wifi client mode..."));
-    //WiFi.persistent(true); //breaks stuff
-
-    if (heishamonSettings->wifi_password[0] == '\0') {
-      WiFi.begin(heishamonSettings->wifi_ssid);
-    } else {
-      WiFi.begin(heishamonSettings->wifi_ssid, heishamonSettings->wifi_password);
-    }
-  }
-  else {
-    if (heishamonSettings->hotspot) {
-      log_message(_F("Wifi hotspot mode..."));
-      WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-      WiFi.softAP(_F("HeishaMon-Setup"));
-    }
-  }
-
-  if (heishamonSettings->wifi_hostname[0] == '\0') {
-    //Set hostname on wifi rather than ESP_xxxxx
-    WiFi.hostname(_F("HeishaMon"));
-  } else {
-    WiFi.hostname(heishamonSettings->wifi_hostname);
-  }
-#elif defined(ESP32)
   //WiFi.setTxPower(WIFI_POWER_8_5dBm); //fix for bad chips
   WiFi.setSleep(false);
   WiFi.mode(WIFI_AP_STA);
@@ -374,11 +339,16 @@ void setupWifi(settingsStruct *heishamonSettings) {
       WiFi.softAP("HeishaMon-Setup");
     }
   }
-
-
-#endif
 }
 
+/*
+ * handleFactoryReset -- Web handler for the factory-reset page.
+ *   content 0: send HTTP headers + CSS + meta refresh.
+ *   content 1: send the confirmation body text.
+ *   content 2: schedule a reboot via timerqueue_insert(1, 0, -1).
+ * Thread-safety: Called from the webserver's cooperative multi-part callback.
+ *   Not safe for concurrent invocation on the same client.
+ */
 int handleFactoryReset(struct webserver_t *client) {
   switch (client->content) {
     case 0: {
@@ -401,6 +371,13 @@ int handleFactoryReset(struct webserver_t *client) {
   return 0;
 }
 
+/*
+ * handleReboot -- Web handler for the reboot page.
+ *   content 0: send HTTP headers + CSS + meta refresh.
+ *   content 1: send the confirmation body.
+ *   content 2: schedule reboot after 5 s via timerqueue_insert(5, 0, -2).
+ * Thread-safety: Same as handleFactoryReset -- single-client callback.
+ */
 int handleReboot(struct webserver_t *client) {
   switch (client->content) {
     case 0: {
@@ -423,8 +400,15 @@ int handleReboot(struct webserver_t *client) {
   return 0;
 }
 
+/*
+ * settingsToJson -- Serialise all fields from settingsStruct into the given
+ *   ArduinoJson JsonDocument.  Boolean fields are written as "enabled"/"disabled"
+ *   strings.  TLS, optionalPCB, proxy, etc. are gated by their respective
+ *   compile-time defines.
+ * Thread-safety: Reentrant -- only reads from the settings struct and writes
+ *   to a caller-owned JsonDocument (stack / local).
+ */
 void settingsToJson(JsonDocument &jsonDoc, settingsStruct *heishamonSettings) {
-  //set jsonDoc with current settings
   jsonDoc[F("wifi_hostname")] = heishamonSettings->wifi_hostname;
   jsonDoc[F("wifi_password")] = heishamonSettings->wifi_password;
   jsonDoc[F("wifi_ssid")] = heishamonSettings->wifi_ssid;
@@ -514,6 +498,13 @@ void settingsToJson(JsonDocument &jsonDoc, settingsStruct *heishamonSettings) {
   jsonDoc[F("s0_2_maxpulsewidth")] = heishamonSettings->s0Settings[1].maximalPulseWidth;  
 }
 
+/*
+ * saveJsonToFile -- Serialise the given JsonDocument to a named file on
+ *   LittleFS.  Opens the file for writing (truncates), serialises, then
+ *   closes.  Errors are silently ignored.
+ * Thread-safety: NOT reentrant.  LittleFS must not be accessed concurrently.
+ *   Typically called from the settings-save path, serialised with other FS ops.
+ */
 void saveJsonToFile(JsonDocument &jsonDoc, const char* filename) {
   if (LittleFS.begin()) {
     File configFile = LittleFS.open(filename, "w");
@@ -525,6 +516,15 @@ void saveJsonToFile(JsonDocument &jsonDoc, const char* filename) {
 }
 
 #ifdef TLS_SUPPORT
+/*
+ * processCAtmp_to_CAPEM -- Validate and install an uploaded CA certificate
+ *   (TLS_SUPPORT only).  Reads "/ca.tmp", checks file size (<=6 kB), parses
+ *   the PEM BEGIN/END tags, validates Base64 characters, and writes the
+ *   cleaned certificate to "/ca.pem.new" before atomically renaming to
+ *   "/ca.pem".  The temporary file is removed on success.
+ * Thread-safety: NOT reentrant (LittleFS access).  Called only from
+ *   handleCACert in the webserver callback context.
+ */
 static bool processCAtmp_to_CAPEM(String &outMsg) {
   outMsg = "";
   File rf = LittleFS.open("/ca.tmp", "r");
@@ -608,6 +608,12 @@ static bool processCAtmp_to_CAPEM(String &outMsg) {
 }
 #endif
 
+/*
+ * passwordWasChanged -- Check whether the user entered a new password
+ *   (as opposed to the placeholder asterisk-only string sent by the web UI).
+ *   Returns true if any non-asterisk character is found.
+ * Thread-safety: Reentrant (pure function).
+ */
 bool passwordWasChanged(const char *returned) {
     for (size_t i = 0; i < strlen(returned); i++) {
         if (returned[i] != '*') return true;
@@ -615,6 +621,20 @@ bool passwordWasChanged(const char *returned) {
     return false;
 }
 
+/*
+ * saveSettings -- Process the settings form POST data previously cached by
+ *   cacheSettings().  Merges per-field values from the linked list into a
+ *   JsonDocument (starting from current settings), handles OTA password
+ *   verification, WiFi credential change detection, then writes the result
+ *   to "/config.json" via saveJsonToFile and reloads with loadSettings().
+ *   Returns an alternate route code:
+ *     111  -> wrong OTA password
+ *     112  -> WiFi credentials changed (triggers reconnect page)
+ *     113  -> normal save success
+ * Thread-safety: NOT reentrant.  Accesses LittleFS, modifies settingsStruct,
+ *   and frees the web-form linked list.  Must be called from a single
+ *   webserver callback context.
+ */
 int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) {
   const char *wifi_ssid = NULL;
   const char *wifi_password = NULL;
@@ -778,24 +798,17 @@ int saveSettings(struct webserver_t *client, settingsStruct *heishamonSettings) 
   return 0;
 }
 
+/*
+ * cacheSettings -- Called once per form field during POST data processing.
+ *   Builds a singly-linked list of websettings_t nodes anchored at
+ *   client->userdata.  Each node holds one form field name + value.
+ *   This list is later consumed by saveSettings().
+ * Thread-safety: NOT reentrant per client.  Only safe within a single
+ *   request's callback sequence.  Allocates heap (new / malloc).
+ */
 int cacheSettings(struct webserver_t *client, struct arguments_t * args) {
   struct websettings_t *tmp = (struct websettings_t *)client->userdata;
   while (tmp) {
-    /*
-        this part is useless as websettings is always NULL at start of a new POST
-        it will only interrate over already POSTed args which are pushed on the list below
-        we only need to find the tail of the list
-        /
-
-      if (strcmp(tmp->name.c_str(), (char *)args->name) == 0) {
-        char *cpy = (char *)malloc(args->len + 1);
-        memset(cpy, 0, args->len + 1);
-        memcpy(cpy, args->value, args->len);
-        tmp->value += cpy;
-        free(cpy);
-        break;
-      }
-    */
     tmp = tmp->next;
   }
   if (tmp == NULL) {
@@ -809,7 +822,7 @@ int cacheSettings(struct webserver_t *client, struct arguments_t * args) {
     node->name += (char *)args->name;
     if (args->value != NULL) {
       char *cpy = (char *)malloc(args->len + 1);
-      if (node == NULL) {
+      if (cpy == NULL) {
         Serial1.printf("Out of memory %s:#%d\n", __FUNCTION__, __LINE__);
         ESP.restart();
         exit(-1);
@@ -827,6 +840,15 @@ int cacheSettings(struct webserver_t *client, struct arguments_t * args) {
   return 0;
 }
 
+/*
+ * settingsNewPassword -- Web handler for the OTA-password change page.
+ *   content 0: HTTP headers + CSS + body start.
+ *   content 1: settings form + password reset warning block.
+ *   content 2: meta refresh + footer.
+ *   content 3: call setupConditionals() (initialises form JS behaviour).
+ * Thread-safety: Single-client webserver callback; reentrant only for
+ *   different client instances.
+ */
 int settingsNewPassword(struct webserver_t *client, settingsStruct *heishamonSettings) {
   switch (client->content) {
     case 0: {
@@ -851,6 +873,12 @@ int settingsNewPassword(struct webserver_t *client, settingsStruct *heishamonSet
   return 0;
 }
 
+/*
+ * settingsReconnectWifi -- Web handler for the "WiFi reconnecting" page,
+ *   displayed after the user changes WiFi credentials.  Sends the HTML body
+ *   with a warning and schedules a reconnect via timerqueue_insert(5, 0, -3).
+ * Thread-safety: Same as settingsNewPassword.
+ */
 int settingsReconnectWifi(struct webserver_t *client, settingsStruct *heishamonSettings) {
   if (client->content == 0) {
     webserver_send(client, 200, (char *)"text/html", 0);
@@ -869,12 +897,26 @@ int settingsReconnectWifi(struct webserver_t *client, settingsStruct *heishamonS
   return 0;
 }
 
+/*
+ * maskPassword -- Fill the output buffer with asterisks of the same length
+ *   as the input string.  Used to avoid sending plaintext passwords to the
+ *   web UI.  Assumes output has at least strlen(input)+1 bytes.
+ * Thread-safety: Reentrant (pure function, no shared state).
+ */
 void maskPassword(const char *input, char *output) {
     size_t len = strlen(input);
     memset(output, '*', len);
     output[len] = '\0';
 }
 
+/*
+ * getSettings -- Return all current settings as a JSON response.
+ *   Builds a JsonDocument via settingsToJson(), masks wifi_password and
+ *   mqtt_password with asterisks, and (with TLS_SUPPORT) reports the
+ *   presence of a CA certificate.  Sends the JSON as application/json.
+ * Thread-safety: NOT reentrant on the same client.  Reads settingsStruct
+ *   (read-only during this call) and accesses LittleFS (for CA cert check).
+ */
 int getSettings(struct webserver_t *client, settingsStruct *heishamonSettings) {
     switch (client->content) {
     case 0: {
@@ -906,6 +948,15 @@ int getSettings(struct webserver_t *client, settingsStruct *heishamonSettings) {
   return 0;
 }
 
+/*
+ * handleSettings -- Web handler for the Settings configuration page.
+ *   content 0: HTTP headers + CSS + body start.
+ *   content 1: settings form part 1 + timezone dropdown.
+ *   content 2: settings form part 2 + JS for settings, CA upload (if TLS),
+ *              and populate-get-settings.
+ *   content 3: WiFi scan populator JS + SSID change JS + footer.
+ * Thread-safety: Single-client callback; reentrant across clients.
+ */
 int handleSettings(struct webserver_t *client) {
   if (client->content == 0) {
     webserver_send(client, 200, (char *)"text/html", 0);
@@ -934,8 +985,19 @@ int handleSettings(struct webserver_t *client) {
 }
 
 #ifdef TLS_SUPPORT
+/*
+ * handleCACert -- Process CA certificate file upload (TLS_SUPPORT only).
+ *   content 0: Call processCAtmp_to_CAPEM() on the uploaded temp file,
+ *              store the result message in a static String, start response.
+ *   content 1: Send the buffered response text, then clear it.
+ *   Uses a static String s_resp to persist the message across multi-part
+ *   webserver callbacks.
+ * Thread-safety: The static s_resp is shared across calls for the same
+ *   request but may be corrupted if multiple upload requests interleave.
+ *   In practice the webserver processes one client at a time.
+ */
 int handleCACert(struct webserver_t *client) {
-  static String s_resp; 
+  static String s_resp;  // Persists response message across multi-part callbacks
   if (client->content == 0) {
     String msg;
     bool ok = processCAtmp_to_CAPEM(msg); 
@@ -962,6 +1024,15 @@ int handleCACert(struct webserver_t *client) {
 }
 #endif
 
+/*
+ * handleWifiScan -- Return cached WiFi scan results as application/json.
+ *   If a previous async scan completed (scanComplete() > 0) the results are
+ *   sorted / deduplicated / saved to "/wifiscan.json" via getWifiScanResults().
+ *   The JSON file is then streamed back to the client.  An async scan is
+ *   initiated for the next poll cycle via WiFi.scanNetworks(true).
+ * Thread-safety: NOT reentrant (LittleFS access).  WiFi scan API must not be
+ *   called concurrently from multiple tasks.
+ */
 int handleWifiScan(struct webserver_t *client) {
 #if defined(ESP32) 
   //first get result from previous scan
@@ -994,14 +1065,17 @@ int handleWifiScan(struct webserver_t *client) {
 
   }
   //initatie a new async scan for next try
-#if defined(ESP8266)
-  WiFi.scanNetworksAsync(getWifiScanResults);
-#elif defined(ESP32)
   WiFi.scanNetworks(true);
-#endif
   return 0;
 }
 
+/*
+ * handleDebug -- Stream a hex dump of a raw data buffer to the web client.
+ *   Formats LOGHEXBYTESPERLINE (32) bytes per line with offset markers.
+ *   Used for diagnostic / log viewing.
+ * Thread-safety: Single-client callback.  The hex buffer must remain valid
+ *   across the multi-part callback sequence.
+ */
 int handleDebug(struct webserver_t *client, char *hex, byte hex_len) {
   {
 #define LOGHEXBYTESPERLINE 32
@@ -1020,6 +1094,19 @@ int handleDebug(struct webserver_t *client, char *hex, byte hex_len) {
 }
 
 
+/*
+ * handleRoot -- Main dashboard page handler.
+ *   content 0: HTTP headers + CSS + body start + root page header.
+ *   content 1: Tab navigation (heatpump / 1-wire / S0 / Opentherm
+ *              depending on settings) + listen-only status bar.
+ *   content 2: Data value blocks for heatpump, 1-wire, S0, opentherm.
+ *   content 3: Console log section.
+ *   content 4: Menu JS.
+ *   content 5: Auto-refresh JS + console toggle JS.
+ *   content 6: Select JS + websocket JS + footer.
+ * Thread-safety: Single-client callback.  Reads from heishamonSettings
+ *   (read-only during this call).
+ */
 int handleRoot(struct webserver_t *client, float readpercentage, int mqttReconnects, settingsStruct *heishamonSettings) {
   switch (client->content) {
     case 0: {
@@ -1078,6 +1165,19 @@ int handleRoot(struct webserver_t *client, float readpercentage, int mqttReconne
   return 0;
 }
 
+/*
+ * handleJsonOutput -- Stream all heatpump telemetry data as a single JSON
+ *   object using a multi-part webserver callback.  Data is split across
+ *   three arrays: "heatpump" (main topics), "heatpump extra" (extra block,
+ *   if available), and "heatpump optional" (optional PCB, if enabled).
+ *   Each array entry contains Topic, Name, Value, and Description fields.
+ *   After the arrays, 1-wire / S0 / opentherm sub-objects are appended
+ *   if the respective features are enabled.
+ *   content is advanced incrementally to avoid blocking the server.
+ * Thread-safety: NOT reentrant per client.  The data buffers (actData,
+ *   actDataExtra, actOptData) must be stable across the multi-part call
+ *   sequence.  heishamonSettings is read-only during the call.
+ */
 int handleJsonOutput(struct webserver_t *client, char* actData, char* actDataExtra, char* actOptData, settingsStruct *heishamonSettings, bool extraDataBlockAvailable) {
   int extraTopics = extraDataBlockAvailable ? NUMBER_OF_TOPICS_EXTRA : 0; //set to 0 if there is no datablock so we don't run json data for it
   int numOptTopics = heishamonSettings->optionalPCB ? NUMBER_OF_OPT_TOPICS : 0; //set to 0 if there is no optionalPCB emulation so we don't run json data for it
@@ -1256,6 +1356,14 @@ int handleJsonOutput(struct webserver_t *client, char* actData, char* actDataExt
 }
 
 
+/*
+ * showRules -- Serve the contents of "/rules.txt" (conditional rule file) as
+ *   an HTML page.  Uses the client->userdata field to hold an open File
+ *   pointer.  Data is served in 128-byte chunks across multiple content
+ *   phases for cooperative multi-tasking.  At EOF the footer and JS are sent.
+ * Thread-safety: NOT reentrant per client.  The File handle in userdata must
+ *   not be shared.  LittleFS must not be accessed concurrently.
+ */
 int showRules(struct webserver_t *client) {
   uint16_t len = 0, len1 = 0;
 
@@ -1340,6 +1448,12 @@ int showRules(struct webserver_t *client) {
   return 0;
 }
 
+/*
+ * showFirmware -- Serve the firmware update page.
+ *   content 0: HTTP headers + CSS + body start.
+ *   content 1: Firmware upload form + menu JS + footer.
+ * Thread-safety: Single-client callback; reentrant across clients.
+ */
 int showFirmware(struct webserver_t *client) {
   if (client->content == 0) {
     webserver_send(client, 200, (char *)"text/html", 0);
@@ -1356,6 +1470,12 @@ int showFirmware(struct webserver_t *client) {
 }
 
 #ifdef TLS_SUPPORT
+/*
+ * showCACert -- Serve the uploaded CA certificate file content as plain text
+ *   (TLS_SUPPORT only).  Reads "/ca.pem" from LittleFS in 256-byte chunks.
+ *   Returns an error message if the file does not exist or cannot be opened.
+ * Thread-safety: NOT reentrant (LittleFS access).
+ */
 int showCACert(struct webserver_t *client) {
   if (client->content == 0) {
     webserver_send(client, 200, (char*)"text/plain", 0);
@@ -1381,6 +1501,11 @@ int showCACert(struct webserver_t *client) {
 }
 #endif
 
+/*
+ * showFirmwareSuccess -- Serve a simple HTML "firmware update succeeded"
+ *   response page.  Sends the firmwareSuccessResponse string verbatim.
+ * Thread-safety: Single-client callback; reentrant across clients.
+ */
 int showFirmwareSuccess(struct webserver_t *client) {
   if (client->content == 0) {
     webserver_send(client, 200, (char *)"text/html", strlen_P(firmwareSuccessResponse));
@@ -1389,6 +1514,13 @@ int showFirmwareSuccess(struct webserver_t *client) {
   return 0;
 }
 
+/*
+ * printUpdateError -- Translate the OTA Update.error() code into a
+ *   human-readable string written into the caller-provided buffer.
+ *   Handles: OK, WRITE, ERASE, READ, SPACE, SIZE, STREAM, NO_DATA,
+ *   MAGIC_BYTE, ACTIVATE, NO_PARTITION, BAD_ARGUMENT, ABORT, and UNKNOWN.
+ * Thread-safety: Reentrant (only uses local state and the Update singleton).
+ */
 static void printUpdateError(char **out, uint8_t size) {
   uint8_t len = 0;
   len = snprintf_P(*out, size, PSTR("ERROR[%u]: "), Update.getError());
@@ -1410,41 +1542,27 @@ static void printUpdateError(char **out, uint8_t size) {
   } else if (Update.getError() == UPDATE_ERROR_NO_DATA) {
     snprintf_P(&(*out)[len], size - len, PSTR("No data supplied"));
 #endif
-  } else if (Update.getError() == UPDATE_ERROR_MD5) {
-    snprintf_P(&(*out)[len], size - len, PSTR("MD5 Failed\n"));
-#if defined(ESP8266)
-  } else if (Update.getError() == UPDATE_ERROR_SIGN) {
-    snprintf_P(&(*out)[len], size - len, PSTR("Signature verification failed"));
-  } else if (Update.getError() == UPDATE_ERROR_FLASH_CONFIG) {
-    snprintf_P(&(*out)[len], size - len, PSTR("Flash config wrong real: %d IDE: %d\n"), ESP.getFlashChipRealSize(), ESP.getFlashChipSize());
-  } else if (Update.getError() == UPDATE_ERROR_NEW_FLASH_CONFIG) {
-    snprintf_P(&(*out)[len], size - len, PSTR("new Flash config wrong real: %d\n"), ESP.getFlashChipRealSize());
   } else if (Update.getError() == UPDATE_ERROR_MAGIC_BYTE) {
-    snprintf_P(&(*out)[len], size - len, PSTR("Magic byte is wrong, not 0xE9"));
-  } else if (Update.getError() == UPDATE_ERROR_BOOTSTRAP) {
-    snprintf_P(&(*out)[len], size - len, PSTR("Invalid bootstrapping state, reset ESP8266 before updating"));
+    snprintf_P(&(*out)[len], size - len, PSTR("Wrong Magic Byte, not 0xE9"));
+  } else if (Update.getError() == UPDATE_ERROR_ACTIVATE) {
+    snprintf_P(&(*out)[len], size - len, PSTR("Could Not Activate The Firmwaren"));
+  } else if (Update.getError() == UPDATE_ERROR_NO_PARTITION) {
+    snprintf_P(&(*out)[len], size - len, PSTR("Partition Could Not be Found"));
+  } else if (Update.getError() == UPDATE_ERROR_BAD_ARGUMENT) {
+    snprintf_P(&(*out)[len], size - len, PSTR("Bad Argument"));
+  } else if (Update.getError() == UPDATE_ERROR_ABORT) {
+    snprintf_P(&(*out)[len], size - len, PSTR("Aborted , Invalid bootstrapping state, reset ESP32 before updating"));
   } else {
     snprintf_P(&(*out)[len], size - len, PSTR("UNKNOWN"));
   }
 }
-#elif defined(ESP32)
-  } else if (Update.getError() == UPDATE_ERROR_MAGIC_BYTE) {   //####ESP32
-    snprintf_P(&(*out)[len], size - len, PSTR("Wrong Magic Byte, not 0xE9"));   //####ESP32
-  } else if (Update.getError() == UPDATE_ERROR_ACTIVATE) {   //####ESP32
-    snprintf_P(&(*out)[len], size - len, PSTR("Could Not Activate The Firmwaren"));   //####ESP32
-  } else if (Update.getError() == UPDATE_ERROR_NO_PARTITION) {   //####ESP32
-    snprintf_P(&(*out)[len], size - len, PSTR("Partition Could Not be Found"));   //####ESP32
-  } else if (Update.getError() == UPDATE_ERROR_BAD_ARGUMENT) {   //####ESP32
-    snprintf_P(&(*out)[len], size - len, PSTR("Bad Argument"));   //####ESP32
-  } else if (Update.getError() == UPDATE_ERROR_ABORT) {   //####ESP32
-    snprintf_P(&(*out)[len], size - len, PSTR("Aborted , Invalid bootstrapping state, reset ESP32 before updating"));   //####ESP32
-  } else {   //####ESP32
-    snprintf_P(&(*out)[len], size - len, PSTR("UNKNOWN"));   //####ESP32
-  }
-}
-#endif
 
 
+/*
+ * showFirmwareFail -- Serve a "firmware update failed" HTML response page
+ *   that includes the error description produced by printUpdateError().
+ * Thread-safety: Single-client callback; reentrant across clients.
+ */
 int showFirmwareFail(struct webserver_t *client) {
   if (client->content == 0) {
     char str[255] = { '\0' }, *p = str;

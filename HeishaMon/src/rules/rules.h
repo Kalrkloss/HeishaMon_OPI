@@ -41,15 +41,7 @@
 #else
   #include <Arduino.h>
   #include "lwip/pbuf.h"
-  #ifdef ESP8266
-    #ifdef MMU_SEC_HEAP_SIZE
-      #define MEMPOOL_SIZE MMU_SEC_HEAP_SIZE
-    #else
-      #define MEMPOOL_SIZE 4096
-    #endif
-  #else
-    #define MEMPOOL_SIZE 32*1024
-  #endif
+  #define MEMPOOL_SIZE 32*1024
 #endif
 
 #define MAX(a,b) \

@@ -1,19 +1,94 @@
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 
+/*
+ * Key Constants
+ *   MQTT_RETAIN_VALUES — if 1, MQTT messages are published with the retain flag,
+ *   so subscribers immediately receive the last known value on subscribe.
+ *
+ *   NUMBER_OF_TOPICS       — count of standard heat-pump data topics (144, TOP0–TOP143)
+ *   NUMBER_OF_TOPICS_EXTRA — count of extra power/energy topics   (  6, XTOP0–XTOP5)
+ *   NUMBER_OF_OPT_TOPICS   — count of optional PCB topics         (  7, OPT0–OPT6)
+ *   MAX_TOPIC_LEN          — maximum length (in bytes) of a topic name string (42)
+ *
+ *   Note: DATASIZE and OPTDATASIZE are NOT defined in this header; they are
+ *   defined in decode.cpp and represent the byte lengths of the raw data frames.
+ */
 #define MQTT_RETAIN_VALUES 1
 
+/*
+ * External function declarations
+ *   resetlastalldatatime() — resets the "last-all-data" timestamp so the next poll
+ *     cycle re-publishes every topic regardless of age.
+ *   websocket_write_all()  — broadcasts a payload to every connected WebSocket client.
+ */
 void resetlastalldatatime();
 void websocket_write_all(char *data, uint16_t data_len);
 
-
+/*
+ * Core decode function declarations
+ *
+ *   getDataValue / getDataValueExtra / getOptDataValue
+ *     Extract a *single* topic's value (as a String) from the corresponding raw
+ *     data buffer. Used when only one value needs refreshing.
+ *
+ *   decode_heatpump_data      — decodes the main 203-byte data frame into all
+ *     standard topics (TOP0–TOP143), publishes via MQTT and WebSocket.
+ *   decode_heatpump_data_extra — decodes the extra (power/energy) data frame
+ *     into XTOP0–XTOP5.
+ *   decode_optional_heatpump_data — decodes the optional-PCB data frame into
+ *     OPT0–OPT6.
+ *
+ *   Each receives:
+ *     data             — raw bytes from the heat pump
+ *     actData / etc.   — previous "active" data for change detection
+ *     log_message      — callback for logging
+ *     mqtt_topic_base  — MQTT topic prefix (e.g. "heatpump/")
+ *     updateAllTime    — interval (seconds) after which *all* values are
+ *                        re-published regardless of change
+ */
 String getDataValue(char* data, unsigned int Topic_Number);
 String getDataValueExtra(char* data, unsigned int Topic_Number);
 String getOptDataValue(char* data, unsigned int Topic_Number);
-void decode_heatpump_data(char* data, char* actData, PubSubClient &mqtt_client, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime);
-void decode_heatpump_data_extra(char* data, char* actDataExtra, PubSubClient &mqtt_client, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime);
-void decode_optional_heatpump_data(char* data, char* actOptDat, PubSubClient &mqtt_client, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime);
+void decode_heatpump_data(char* data, char* actData, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime);
+void decode_heatpump_data_extra(char* data, char* actDataExtra, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime);
+void decode_optional_heatpump_data(char* data, char* actOptDat, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime);
 
+/*
+ * Decoder helper functions
+ *
+ * Each takes one or more raw byte(s) and returns a human-readable String.
+ * They implement the various data encodings used by the heat pump protocol.
+ *
+ * Bit-field extractors:
+ *   unknown         — placeholder, returns "unknown"
+ *   getBit1         — extracts bit 0 (LSB)                   → "0" or "1"
+ *   getBit1and2     — extracts bits 0–1                      → 0..3
+ *   getBit3and4     — extracts bits 2–3                      → 0..3
+ *   getBit5and6     — extracts bits 4–5                      → 0..3
+ *   getBit7and8     — extracts bits 6–7                      → 0..3
+ *   getBit3and4and5 — extracts bits 2–4                      → 0..7
+ *   getLeft5bits    — extracts bits 3–7                      → 0..31
+ *   getRight3bits   — extracts bits 0–2                      → 0..7
+ *
+ * Numeric decoders (byte in → scaled value):
+ *   getIntMinus1       — val = input - 1
+ *   getIntMinus128     — val = input - 128                   (signed byte)
+ *   getIntMinus1Div5   — val = (input - 1) / 5
+ *   getIntMinus1Div50  — val = (input - 1) / 50
+ *   getIntMinus1Times10 — val = (input - 1) * 10
+ *   getIntMinus1Times50 — val = (input - 1) * 50
+ *   getUintt16         — reads a 16-bit unsigned integer from data[input..input+1]
+ *
+ * Semantic decoders:
+ *   getValvePID  — decodes a valve PID value
+ *   getOpMode    — decodes the operating mode enumeration
+ *   getPower     — decodes power (W) from a 16-bit big-endian value
+ *   getHeatMode  — decodes heating/cooling mode
+ *   getModel     — decodes the heat pump model identifier
+ *   getFirstByte — extracts the first byte of a 2-byte field
+ *   getSecondByte — extracts the second byte of a 2-byte field
+ */
 String unknown(byte input);
 String getBit1(byte input);
 String getBit1and2(byte input);
@@ -38,15 +113,32 @@ String getFirstByte(byte input);
 String getSecondByte(byte input);
 String getUintt16(char * data, byte input);
 
+/* Internal fallback string used when a topic cannot be decoded. */
 static const char _unknown[] PROGMEM = "unknown";
 
-
-
+/*
+ * Array-size constants
+ *
+ * These define the number of entries in the topics / xtopics / optTopics
+ * arrays and the capacity needed for topic name buffers.
+ */
 #define NUMBER_OF_TOPICS 144 //last topic number + 1
 #define NUMBER_OF_TOPICS_EXTRA 6 //last topic number + 1
 #define NUMBER_OF_OPT_TOPICS 7 //last topic number + 1
 #define MAX_TOPIC_LEN 42 // max length + 1
 
+/*
+ * Optional-PCB topic name array (optTopics)
+ *
+ * Maps indices OPT0–OPT6 to human-readable topic name strings.
+ * These correspond to optional add-on PCB signals (zone pumps,
+ * mixing valves, pool/solar pumps, alarm state).
+ *
+ * Layout:              optTopics[OPTn] → "Z1_Water_Pump", etc.
+ *   Byte decode offset: implicit (handled in decode.cpp)
+ *   Decoder function:   implicit (handled in decode.cpp)
+ *   Unit/description:   opttopicDescription[OPTn]
+ */
 static const char optTopics[][20] PROGMEM = {
   "Z1_Water_Pump", // OPT0
   "Z1_Mixing_Valve", // OPT1
@@ -57,6 +149,19 @@ static const char optTopics[][20] PROGMEM = {
   "Alarm_State", // OPT6
 };
 
+/*
+ * Extra (power/energy) topic name array (xtopics)
+ *
+ * Maps indices XTOP0–XTOP5 to human-readable topic name strings.
+ * These carry accumulated power consumption/production for heat,
+ * cool, and DHW separately from the main data frame.
+ *
+ * Layout:
+ *   xtopics[XTOPn]      → topic name string (e.g. "Heat_Power_Consumption_Extra")
+ *   xtopicBytes[XTOPn]  → byte offset in the extra data frame
+ *   xtopicFunctions[XTOPn] → function pointer to decode the value
+ *   xtopicDescription[XTOPn] → unit / enum description pointer
+ */
 static const char xtopics[][MAX_TOPIC_LEN] PROGMEM = {
   "Heat_Power_Consumption_Extra", //XTOP0
   "Cool_Power_Consumption_Extra", //XTOP1
@@ -66,6 +171,10 @@ static const char xtopics[][MAX_TOPIC_LEN] PROGMEM = {
   "DHW_Power_Production_Extra",  //XTOP5
 };
 
+/*
+ * Byte offsets within the extra data frame for each XTOPn.
+ * Because the frame is small (well under 255 bytes), a single byte suffices.
+ */
 static const byte xtopicBytes[] PROGMEM = { //can store the index as byte (8-bit unsigned humber) as there aren't more then 255 bytes (actually only 203 bytes) to decode
   14,      //XTOP0
   16,      //XTOP1
@@ -75,6 +184,19 @@ static const byte xtopicBytes[] PROGMEM = { //can store the index as byte (8-bit
   24,      //XTOP5
 };
 
+/*
+ * Standard heat-pump topic name array (topics)
+ *
+ * Maps indices TOP0–TOP143 to human-readable topic name strings.
+ * This is the primary data dictionary — every measurable/configureable
+ * value exposed by the heat pump has an entry here.
+ *
+ * Layout (4 parallel arrays indexed by TOPn):
+ *   topics[TOPn]         → topic name string  (e.g. "Heatpump_State")
+ *   topicBytes[TOPn]     → byte offset in the 203-byte data frame
+ *   topicFunctions[TOPn] → function pointer to decode the raw byte(s)
+ *   topicDescription[TOPn] → unit (e.g. "°C") or enum-description table
+ */
 static const char topics[][MAX_TOPIC_LEN] PROGMEM = {
   "Heatpump_State",          //TOP0
   "Pump_Flow",               //TOP1
@@ -222,6 +344,13 @@ static const char topics[][MAX_TOPIC_LEN] PROGMEM = {
   "DHW_Sensor_Selection",    //TOP143
 };
 
+/*
+ * Byte offsets within the main 203-byte data frame for each TOPn.
+ * The value is stored in PROGMEM since it is large (144 entries).
+ * Using byte suffices because the frame is < 256 bytes.
+ * A value of 0 typically means the topic is not directly mapped to a
+ * single byte offset and is handled specially by the topicFunctions decoder.
+ */
 static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit unsigned humber) as there aren't more then 255 bytes (actually only 203 bytes) to decode
   4,      //TOP0
   0,      //TOP1
@@ -370,6 +499,15 @@ static const byte topicBytes[] PROGMEM = { //can store the index as byte (8-bit 
 };
 
 
+/*
+ * Function-pointer array for extra topic decoding (xtopicFunctions)
+ *
+ * Each entry is a callback that reads raw data (char* buffer + byte offset)
+ * and returns a decoded String. All extra topics currently use getUintt16
+ * (16-bit unsigned integer).
+ *
+ * The corresponding function-pointer type is xtopicFP.
+ */
 typedef String (*xtopicFP)(char*, byte);
 static const xtopicFP xtopicFunctions[] PROGMEM = {
   getUintt16,         //XTOP0
@@ -380,6 +518,15 @@ static const xtopicFP xtopicFunctions[] PROGMEM = {
   getUintt16,         //XTOP5
 };
 
+/*
+ * Function-pointer array for standard topic decoding (topicFunctions)
+ *
+ * Each entry is a callback that takes a single raw byte (read from the
+ * frame at topicBytes[TOPn]) and returns a decoded String.
+ *
+ * The function-pointer type is topicFP.  The actual decoder functions
+ * (getIntMinus128, getBit7and8, getOpMode, …) are declared above.
+ */
 typedef String (*topicFP)(byte);
 static const topicFP topicFunctions[] PROGMEM = {
   getBit7and8,         //TOP0
@@ -528,6 +675,22 @@ static const topicFP topicFunctions[] PROGMEM = {
   getBit7and8,       //TOP143
 };
 
+/*
+ * String-lookup tables (enum/value descriptions)
+ *
+ * Each table is a PROGMEM array of C-strings where:
+ *   element[0] = number of meaningful entries that follow (as a string)
+ *   element[1..n] = the descriptive strings for each possible value
+ *
+ * These serve dual purpose:
+ *   a) For enum-like topics — map the numeric index to a human label
+ *      (e.g. 1 → "Disabled", 2 → "Enabled").
+ *   b) For numeric topics — element[0] is "0" (no enum mapping) and
+ *      element[1] is the unit suffix (e.g. "°C", "W", "Bar").
+ *
+ * The topicDescription / xtopicDescription / opttopicDescription arrays
+ * (below) link each topic to its corresponding table.
+ */
 static const char *DisabledEnabled[] PROGMEM = {"2", "Disabled", "Enabled"};
 static const char *BlockedFree[] PROGMEM = {"2", "Blocked", "Free"};
 static const char *OffOn[] PROGMEM = {"2", "Off", "On"};
@@ -569,6 +732,12 @@ static const char *QuietModePriority[] PROGMEM = {"2", "Sound", "Capacity"};
 static const char *DHWSensorType[] PROGMEM = {"2", "Top", "Center"};
 static const char *Steps[] PROGMEM = {"0", "Steps"};
 
+/*
+ * Optional-PCB topic description array (opttopicDescription)
+ *
+ * Parallel to optTopics: each entry OPTn points to the string-lookup
+ * table that describes possible values or the unit for that topic.
+ */
 static const char **opttopicDescription[] PROGMEM = {
   OffOn,          //OPT0
   MixingValve,    //OPT1
@@ -579,6 +748,12 @@ static const char **opttopicDescription[] PROGMEM = {
   OffOn,          //OPT6
 };
 
+/*
+ * Extra-topic description array (xtopicDescription)
+ *
+ * Parallel to xtopics: each entry XTOPn points to the string-lookup
+ * table for that topic (all extra topics use "Watt" as unit).
+ */
 static const char **xtopicDescription[] PROGMEM = {
   Watt,           //XTOP0
   Watt,           //XTOP1
@@ -588,6 +763,14 @@ static const char **xtopicDescription[] PROGMEM = {
   Watt,           //XTOP5
 };
 
+/*
+ * Standard-topic description array (topicDescription)
+ *
+ * Parallel to topics: each entry TOPn points to the string-lookup
+ * table that describes possible values (for enum topics) or the unit
+ * (for numeric topics).  This drives MQTT payload formatting and
+ * WebSocket display.
+ */
 static const char **topicDescription[] PROGMEM = {
   OffOn,           //TOP0
   LitersPerMin,    //TOP1

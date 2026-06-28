@@ -2,11 +2,15 @@
 #include "commands.h"
 #include "rules.h"
 #include "src/common/progmem.h"
+#include "mqtt_queue.h"
 
 void websocket_write_all(char *data, uint16_t data_len);
 
+// Timestamp (millis()) of the last full publish for the main data block; 0 means "never".
 unsigned long lastalldatatime = 0;
+// Timestamp (millis()) of the last full publish for the extra data block; 0 means "never".
 unsigned long lastallextradatatime = 0;
+// Timestamp (millis()) of the last full publish for the optional PCB data block; 0 means "never".
 unsigned long lastalloptdatatime = 0;
 
 String getBit1(byte input) {
@@ -288,8 +292,25 @@ String getSecondByte(byte input) {
 
 
 
-// Decode ////////////////////////////////////////////////////////////////////////////
-void decode_heatpump_data(char* data, char* actData, PubSubClient &mqtt_client, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime) {
+/* decode_heatpump_data() — Main heatpump data decoder.
+ *
+ * Called each time a complete main data frame (DATASIZE bytes) arrives from
+ * the heatpump. It iterates all defined TOP topics, extracts the current value
+ * from the raw buffer via getDataValue(), compares it against the last-known
+ * value stored in actData, and publishes any changes via MQTT and WebSocket.
+ *
+ * A periodic "updateAll" mechanism forces a re-publish of every topic when
+ * updateAllTime seconds have elapsed since the last full sweep, regardless of
+ * whether individual values changed. This ensures subscribers eventually get
+ * data even when values are stable.
+ *
+ * Thread-safety: This function is NOT re-entrant. It accesses (and mutates)
+ * the global lastalldatatime and writes into the caller-owned actData buffer.
+ * It also calls mqttPublishQueued (which may guard its own queue behind a
+ * mutex) and websocket_write_all. The caller must ensure that this function
+ * is never invoked concurrently from multiple tasks/ISRs.
+ */
+void decode_heatpump_data(char* data, char* actData, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime) {
   bool updateTime = false;
   bool updateTopic[NUMBER_OF_TOPICS] = { false };
 
@@ -311,7 +332,7 @@ void decode_heatpump_data(char* data, char* actData, PubSubClient &mqtt_client, 
       sprintf_P(log_msg, PSTR("received TOP%d %s: %s"), Topic_Number, topics[Topic_Number], Topic_Value.c_str());
       log_message(log_msg);
       sprintf_P(mqtt_topic, PSTR("%s/%s/%s"), mqtt_topic_base, mqtt_topic_values, topics[Topic_Number]);
-      mqtt_client.publish(mqtt_topic, Topic_Value.c_str(), MQTT_RETAIN_VALUES);
+      mqttPublishQueued(mqtt_topic, Topic_Value.c_str(), MQTT_RETAIN_VALUES);
     }
   }
   memcpy(actData, data, DATASIZE);
@@ -335,7 +356,22 @@ void decode_heatpump_data(char* data, char* actData, PubSubClient &mqtt_client, 
   }
 }
 
-void decode_heatpump_data_extra(char* data, char* actDataExtra, PubSubClient &mqtt_client, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime) {
+/* decode_heatpump_data2() — Second / extra heatpump data decoder.
+ *
+ * Mirrors the logic of decode_heatpump_data() but operates on the "extra"
+ * topic table (XTOP / xtopics / xtopicBytes / xtopicFunctions). It is used
+ * when the heatpump sends a secondary data block that contains additional
+ * sensors/registers that do not fit into the primary 184-byte layout.
+ *
+ * Each extra topic value is extracted via getDataValueExtra(), compared
+ * against the snapshot in actDataExtra, and published on change or on the
+ * periodic "updateAll" timer (tracked by lastallextradatatime).
+ *
+ * Thread-safety: Same constraints as decode_heatpump_data(). Not re-entrant.
+ * Shares the global lastallextradatatime and calls the same output paths
+ * (mqttPublishQueued, websocket_write_all). Must be serialised by the caller.
+ */
+void decode_heatpump_data_extra(char* data, char* actDataExtra, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime) {
   bool updateTime = false;
   bool updateTopic[NUMBER_OF_TOPICS_EXTRA] = { false };
 
@@ -357,7 +393,7 @@ void decode_heatpump_data_extra(char* data, char* actDataExtra, PubSubClient &mq
       sprintf_P(log_msg, PSTR("received XTOP%d %s: %s"), Topic_Number, xtopics[Topic_Number], Topic_Value.c_str());
       log_message(log_msg);
       sprintf_P(mqtt_topic, PSTR("%s/%s/%s"), mqtt_topic_base, mqtt_topic_xvalues, xtopics[Topic_Number]);
-      mqtt_client.publish(mqtt_topic, Topic_Value.c_str(), MQTT_RETAIN_VALUES);
+      mqttPublishQueued(mqtt_topic, Topic_Value.c_str(), MQTT_RETAIN_VALUES);
     }
   }
   memcpy(actDataExtra, data, DATASIZE);
@@ -377,7 +413,23 @@ void decode_heatpump_data_extra(char* data, char* actDataExtra, PubSubClient &mq
   }
 }
 
-void decode_optional_heatpump_data(char* data, char* actOptData, PubSubClient & mqtt_client, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime) {
+/* decode_optional_heatpump_data() — Optional / extra PCB data block decoder.
+ *
+ * Handles a smaller, variable-length data block (OPTDATASIZE bytes) that
+ * reports PCB-level digital/analogue I/O states (relays, digital inputs,
+ * etc.). Topic values are parsed inline via getOptDataValue() rather than
+ * through the table-driven path used by the other two decoders.
+ *
+ * Beyond publishing, this function also feeds back two bytes (data[4] and
+ * data[5]) into the global optionalPCBQuery buffer, which is later sent back
+ * to the heatpump as part of the query/response protocol — the heatpump
+ * expects to see its own output values echoed.
+ *
+ * Thread-safety: Not re-entrant. Accesses global lastalloptdatatime and
+ * optionalPCBQuery. Calls the same output paths as the other decoders.
+ * The caller must ensure serialised access.
+ */
+void decode_optional_heatpump_data(char* data, char* actOptData, void (*log_message)(char*), char* mqtt_topic_base, unsigned int updateAllTime) {
   bool updateTime = false;
   bool updateTopic[NUMBER_OF_OPT_TOPICS] = { false };
 
@@ -399,7 +451,7 @@ void decode_optional_heatpump_data(char* data, char* actOptData, PubSubClient & 
       sprintf_P(log_msg, PSTR("received OPT%d %s: %s"), Topic_Number, optTopics[Topic_Number], Topic_Value.c_str());
       log_message(log_msg);
       sprintf_P(mqtt_topic, PSTR("%s/%s/%s"), mqtt_topic_base, mqtt_topic_pcbvalues, optTopics[Topic_Number]);
-      mqtt_client.publish(mqtt_topic, Topic_Value.c_str(), MQTT_RETAIN_VALUES);
+      mqttPublishQueued(mqtt_topic, Topic_Value.c_str(), MQTT_RETAIN_VALUES);
 
     }
   }

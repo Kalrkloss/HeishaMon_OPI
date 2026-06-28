@@ -24,7 +24,7 @@ static unsigned int lasttime = 0;
 static unsigned int *calls = NULL;
 static unsigned int nrcalls = 0;
 
-#if defined(ESP32) || defined(ESP8266)
+#if defined(ESP32)
 static unsigned long timerqueue_micros() {
   return micros();
 }

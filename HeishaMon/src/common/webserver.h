@@ -18,11 +18,7 @@
 #endif
 
 #ifndef WEBSERVER_BUFFER_SIZE
-  #ifdef ESP8266
-    #define WEBSERVER_BUFFER_SIZE 128
-  #else
     #define WEBSERVER_BUFFER_SIZE 512
-  #endif
 #endif
 
 #ifndef WEBSERVER_MAX_CLIENTS

@@ -9,8 +9,10 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "IPAddress.h"
+#include "esp_spiffs.h"
 #include <time.h>
 #include <mdns.h>
+#include <sys/stat.h>
 
 // ---- GPIO implementation ----
 void pinMode(uint8_t pin, uint8_t mode) {
@@ -224,12 +226,80 @@ void MDNSClass::addService(const char* service, const char* proto, uint16_t port
     mdns_service_add(NULL, srv, proto, port, NULL, 0);
 }
 
+// ---- LittleFSClass (SPIFFS) implementation ----
+void LittleFSClass::make_path(char* buf, size_t bufsz, const char* path) {
+    snprintf(buf, bufsz, "%s%s", LITTLEFS_MOUNT_POINT, path);
+}
+
+LittleFSClass::LittleFSClass() : mounted_(false) {}
+LittleFSClass::~LittleFSClass() { end(); }
+
+bool LittleFSClass::begin(bool formatOnFail) {
+    if (mounted_) return true;
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = LITTLEFS_MOUNT_POINT,
+        .partition_label = NULL,
+        .max_files = 8,
+        .format_if_mount_failed = formatOnFail,
+    };
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret == ESP_OK) {
+        mounted_ = true;
+        return true;
+    }
+    return false;
+}
+
+void LittleFSClass::end() {
+    if (mounted_) {
+        esp_vfs_spiffs_unregister(NULL);
+        mounted_ = false;
+    }
+}
+
+bool LittleFSClass::format() {
+    esp_err_t ret = esp_spiffs_format(NULL);
+    return ret == ESP_OK;
+}
+
+bool LittleFSClass::exists(const char* path) {
+    char full[128];
+    make_path(full, sizeof(full), path);
+    struct stat st;
+    return stat(full, &st) == 0;
+}
+
+File LittleFSClass::open(const char* path, const char* mode) {
+    char full[128];
+    make_path(full, sizeof(full), path);
+    FILE* fp = fopen(full, mode);
+    if (!fp) return File();
+    return File(fp, String(path));
+}
+
+bool LittleFSClass::remove(const char* path) {
+    char full[128];
+    make_path(full, sizeof(full), path);
+    return unlink(full) == 0;
+}
+
+bool LittleFSClass::rename(const char* from, const char* to) {
+    char full_from[128], full_to[128];
+    make_path(full_from, sizeof(full_from), from);
+    make_path(full_to, sizeof(full_to), to);
+    return ::rename(full_from, full_to) == 0;
+}
+
+bool LittleFSClass::mkdir(const char* path) {
+    (void)path;
+    return true;
+}
+
 // ---- Global instances ----
 WiFiClass WiFi;
 MDNSClass MDNS;
 ArduinoOTAClass ArduinoOTA;
 LittleFSClass LittleFS;
-UpdateClass Update;
 SPIClass SPI;
 ETHClass ETH;
 ESPClass ESP;

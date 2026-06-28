@@ -11,6 +11,8 @@
 
 #include <Arduino.h>
 
+#ifndef _F
 #define _F(a) (char *)(String(F(a)).c_str())
+#endif
 
 #endif

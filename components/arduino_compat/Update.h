@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "Arduino.h"
+#include "esp_ota_ops.h"
+#include "mbedtls/md5.h"
 
 #define UPDATE_ERROR_OK          0
 #define UPDATE_ERROR_WRITE       1
@@ -20,20 +22,34 @@
 
 class UpdateClass {
 public:
-    bool begin(size_t size) { return true; }
-    bool write(const uint8_t* data, size_t len) { return true; }
-    bool end(bool evenIfRemaining = false) { return true; }
-    bool isRunning() { return false; }
-    bool hasError() { return false; }
-    bool setMD5(const char* md5) { return true; }
-    size_t getFreeSketchSpace() { return 0x200000; }
-    void printError(Stream& s) {}
-    void runAsync(bool a) {}
-    void abort() {}
-    size_t writeStream(Stream& s) { return 0; }
-    int progress() { return 0; }
-    size_t size() { return 0; }
-    uint8_t getError() { return UPDATE_ERROR_OK; }
+    UpdateClass();
+    ~UpdateClass();
+
+    bool begin(size_t size);
+    bool write(const uint8_t* data, size_t len);
+    bool end(bool evenIfRemaining = false);
+    bool isRunning();
+    bool hasError();
+    bool setMD5(const char* md5);
+    size_t getFreeSketchSpace();
+    void printError(Stream& s);
+    void runAsync(bool a);
+    void abort();
+    size_t writeStream(Stream& s);
+    int progress();
+    size_t size();
+    uint8_t getError();
+
+private:
+    bool running_;
+    bool md5_set_;
+    uint8_t expected_md5_[16];
+    esp_ota_handle_t ota_handle_;
+    const esp_partition_t* ota_partition_;
+    size_t size_;
+    size_t written_;
+    uint8_t error_;
+    mbedtls_md5_context md5_ctx_;
 };
 
 extern UpdateClass Update;

@@ -1,13 +1,7 @@
 
-#if defined(ESP8266)
-#include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
-  #define heatpumpSerial Serial
-  #define loggingSerial Serial1
-  #define ENABLEPIN 5
-  #define LEDPIN 2
-  #define BOOTPIN 0
-#elif defined(ESP32)
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <Adafruit_NeoPixel.h>
   #define heatpumpSerial Serial1
   #define loggingSerial Serial //usb serial CDC
   #define uartSerial Serial0 //not used, 10x header pin
@@ -23,10 +17,6 @@
   #endif
   #define LEDPIN HEISHAMON_LED_PIN
   #define BOOTPIN 0
-#include <WiFi.h>
-#include <ESPmDNS.h>
-#include <Adafruit_NeoPixel.h>
-#endif
 
 
 #include <DNSServer.h>
@@ -47,19 +37,15 @@
 #include "commands.h"
 #include "rules.h"
 #include "version.h"
+#include "mqtt_queue.h"
 
-DNSServer dnsServer;
+DNSServer dnsServer; // DNS server for captive portal during AP mode
 
-//to read bus voltage in stats
-#ifdef ESP8266
-ADC_MODE(ADC_VCC);
-#endif
-
-const byte DNS_PORT = 53;
+const byte DNS_PORT = 53; // DNS server port
 
 #define SERIALTIMEOUT 2000 // wait until all 203 bytes are read, must not be too long to avoid blocking the code
 
-settingsStruct heishamonSettings;
+settingsStruct heishamonSettings; // Main settings struct, loaded from config.json on boot
 
 uint32_t neoPixelState = 0; //running neoPixelState
 bool inSetup; //bool to check if still booting
@@ -69,62 +55,59 @@ bool mqttcallbackinprogress = false; // mutex for processing mqtt callback
 bool extraDataBlockAvailable = false; // this will be set to true if, during boot, heishamon detects this heatpump has extra data block (like K and L series do)
 
 #define MQTTRECONNECTTIMER 30000 //it takes 30 secs for each mqtt server reconnect attempt
-unsigned long lastMqttReconnectAttempt = 0;
+unsigned long lastMqttReconnectAttempt = 0; // Timestamp of last MQTT reconnect attempt
 
-unsigned long bootButtonNotPressed = 0;
+unsigned long bootButtonNotPressed = 0; // Timestamp when boot button was last seen released (used for long-press detection)
 
 #define WIFIRETRYTIMER 15000 // switch between hotspot and configured SSID each 10 secs if SSID is lost
-unsigned long lastWifiRetryTimer = 0;
+unsigned long lastWifiRetryTimer = 0; // Timestamp of last WiFi connection retry
 bool doInitialWifiScan = true; //we want an initial wifi scan to fill in the dropbox on the wifi settings page
 
-unsigned long lastRunTime = 0;
+unsigned long lastRunTime = 0; // Timestamp of last periodic stats/log output in loop()
 
-#ifdef ESP8266
-unsigned long lastOptionalPCBRunTime = 0;
-unsigned long lastOptionalPCBSave = 0;
-#endif
 volatile unsigned long sendCommandReadTime = 0; //set to millis value during send, allow to wait millis for answer
 
-unsigned long goodreads = 0;
-unsigned long totalreads = 0;
-unsigned long badcrcread = 0;
-unsigned long badheaderread = 0;
-unsigned long tooshortread = 0;
-unsigned long toolongread = 0;
-unsigned long timeoutread = 0;
-float readpercentage = 0;
-static int uploadpercentage = 0;
+unsigned long goodreads = 0;   // Count of serial reads with valid header + checksum
+unsigned long totalreads = 0;  // Total serial read attempts
+unsigned long badcrcread = 0;  // Count of CRC checksum failures
+unsigned long badheaderread = 0; // Count of invalid header (wrong sync bytes)
+unsigned long tooshortread = 0; // Count of incomplete (truncated) reads
+unsigned long toolongread = 0;  // Count of reads exceeding expected length
+unsigned long timeoutread = 0;  // Count of serial read timeouts
+float readpercentage = 0;      // Percentage of good reads (goodreads/totalreads*100)
+static int uploadpercentage = 0; // Firmware OTA upload progress (0-20 * 5%)
 
 // instead of passing array pointers between functions we just define this in the global scope
-#define MAXDATASIZE 255
-char data[MAXDATASIZE] = { '\0' };
-byte data_length = 0;
+#define MAXDATASIZE 255        // Maximum size of serial data / proxy data buffers
+char data[MAXDATASIZE] = { '\0' }; // Serial receive buffer for heatpump data
+byte data_length = 0;            // Number of valid bytes in data[]
 
 #ifdef ESP32
 //for received proxied data
-char proxydata[MAXDATASIZE] = { '\0' };
-byte proxydata_length = 0;
+char proxydata[MAXDATASIZE] = { '\0' }; // Serial receive buffer for proxy (CZ-TAW1 passthrough) data
+byte proxydata_length = 0;               // Number of valid bytes in proxydata[]
 //for the neopixel
 Adafruit_NeoPixel pixels(1, LEDPIN);
 //for the vTask
-QueueHandle_t pcbQueue = NULL;
-QueueHandle_t cmdQueue = NULL;
-QueueHandle_t logQueue = NULL;
+QueueHandle_t pcbQueue = NULL;        // Queue (depth 1) holding the latest optional PCB query data
+QueueHandle_t cmdQueue = NULL;        // Queue for user commands to send to heatpump (consumed by serialTXTask)
+QueueHandle_t logQueue = NULL;        // Queue for log messages from FreeRTOS tasks (consumed in loop())
+QueueHandle_t mqttPublishQueue = NULL; // Queue for MQTT publish messages (consumed by mqttTask)
 #endif
 
-// store actual data
-char actData[DATASIZE] = { '\0' };
-char actDataExtra[DATASIZE] = { '\0' };
-char actOptData[OPTDATASIZE]  = { '\0' };
+// store decoded heatpump data for use by other modules (web, proxy, opentherm, mqtt publish)
+char actData[DATASIZE] = { '\0' };      // Decoded heatpump main data block (header 0x10, 203 bytes)
+char actDataExtra[DATASIZE] = { '\0' }; // Decoded heatpump extra data block (header 0x21, 203 bytes)
+char actOptData[OPTDATASIZE]  = { '\0' }; // Decoded optional PCB data (header 0xF1)
 
-// log message to sprintf to
+// log message to sprintf to (reusable buffer, content is volatile)
 #define LOG_MSG_SIZE 256
-char log_msg[LOG_MSG_SIZE];
+char log_msg[LOG_MSG_SIZE]; // Reusable buffer for sprintf log messages
 
 // mqtt topic to sprintf and then publish to
-char mqtt_topic[256];
+char mqtt_topic[256]; // Reusable buffer for sprintf MQTT topic strings
 
-static int mqttReconnects = 0;
+static int mqttReconnects = 0; // Number of successful MQTT connections since boot
 
 // can't have too much in buffer due to memory shortage
 #define MAXCOMMANDSINBUFFER 10
@@ -198,98 +181,6 @@ void setupETH() {
 /*
     check_wifi will process wifi reconnecting managing
 */
-#if defined(ESP8266)
-void check_wifi() {
-  int wifistatus = WiFi.status();
-  if ((wifistatus != WL_CONNECTED) && (WiFi.localIP())) {
-    // special case where it seems that we are not connect but we do have working IP (causing the -1% wifi signal), do a reset.
-    log_message(_F("Weird case, WiFi seems disconnected but is not. Resetting WiFi!"));
-    setupWifi(&heishamonSettings);
-  } else if ((wifistatus != WL_CONNECTED) || (!WiFi.localIP())) {
-    /*
-        if we are not connected to an AP
-        we must be in softAP so respond to DNS
-    */
-    if (heishamonSettings.hotspot) {
-      dnsServer.processNextRequest();
-    }
-
-    /* we need to stop reconnecting to a configured wifi network if there is a hotspot user connected
-        also, do not disconnect if wifi network scan is active
-    */
-    if ((heishamonSettings.wifi_ssid[0] != '\0') && (wifistatus != WL_DISCONNECTED) && (WiFi.scanComplete() != -1) && (WiFi.softAPgetStationNum() > 0)) {
-      log_message(_F("WiFi lost, but softAP station connecting, so stop trying to connect to configured ssid..."));
-      WiFi.disconnect(true);
-    }
-
-    /*  only start this routine if timeout on
-        reconnecting to AP and SSID is set
-    */
-    if ((heishamonSettings.wifi_ssid[0] != '\0') && ((unsigned long)(millis() - lastWifiRetryTimer) > WIFIRETRYTIMER)) {
-      lastWifiRetryTimer = millis();
-      if ((WiFi.softAPSSID() == "") && (heishamonSettings.hotspot)) {
-        log_message(_F("WiFi lost, starting setup hotspot..."));
-        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-        WiFi.softAP(_F("HeishaMon-Setup"));
-      }
-      if ((wifistatus == WL_DISCONNECTED) && (WiFi.softAPgetStationNum() == 0)) {
-        log_message(_F("Retrying configured WiFi, ..."));
-        if (heishamonSettings.wifi_password[0] == '\0') {
-          WiFi.begin(heishamonSettings.wifi_ssid);
-        } else {
-          WiFi.begin(heishamonSettings.wifi_ssid, heishamonSettings.wifi_password);
-        }
-      } else {
-        log_message(_F("Reconnecting to WiFi failed. Waiting a few seconds before trying again."));
-        WiFi.disconnect(true);
-      }
-    }
-  }
-  if (WiFi.localIP()) {  //WiFi connected
-    if (WiFi.softAPSSID() != "") {
-      log_message(_F("WiFi (re)connected, shutting down hotspot..."));
-      WiFi.softAPdisconnect(true);
-      MDNS.notifyAPChange();
-    }
-
-    if (firstConnectSinceBoot) {  // this should start only when softap is down or else it will not work properly so run after the routine to disable softap
-      firstConnectSinceBoot = false;
-      lastMqttReconnectAttempt = 0;  //initiate mqtt connection asap
-      setupOTA();
-      MDNS.begin(heishamonSettings.wifi_hostname);
-      MDNS.addService("http", "tcp", 80);
-      experimental::ESP8266WiFiGratuitous::stationKeepAliveSetIntervalMs(5000);  //necessary for some users with bad wifi routers
-
-      if (heishamonSettings.wifi_ssid[0] == '\0') {
-        log_message(_F("WiFi connected without SSID and password in settings. Must come from persistent memory. Storing in settings."));
-        WiFi.SSID().toCharArray(heishamonSettings.wifi_ssid, 40);
-        WiFi.psk().toCharArray(heishamonSettings.wifi_password, 40);
-        JsonDocument jsonDoc;
-        settingsToJson(jsonDoc, &heishamonSettings);  //stores current settings in a json document
-        saveJsonToFile(jsonDoc, "config.json");     //save to config file
-      }
-
-      ntpReload(&heishamonSettings);
-      logprintln_P(F("Try to syncing with ntp servers. Checking again in 5 minutes"));
-      timerqueue_insert(300, 0, -6);
-    }
-
-    /*
-       always update if wifi is working so next time on ssid failure
-       it only starts the routine above after this timeout
-    */
-    lastWifiRetryTimer = millis();
-
-    // Allow MDNS processing
-    MDNS.update();
-  }
-  if (doInitialWifiScan && (millis() > 15000)) {  //do a wifi scan a boot after 15 seconds
-    doInitialWifiScan = false;
-    log_message(_F("Starting initial wifi scan ..."));
-    WiFi.scanNetworksAsync(getWifiScanResults);
-  }
-}
-#elif defined(ESP32)
 void check_wifi() {
   wl_status_t wifistatus = WiFi.status();
   bool ethUp = ETH.hasIP();
@@ -401,7 +292,6 @@ void check_wifi() {
     }
   }
 }
-#endif
 
 #ifdef TLS_SUPPORT
 bool loadTlsCaFromFS(WiFiClientSecure *client) {
@@ -431,6 +321,16 @@ bool loadTlsCaFromFS(WiFiClientSecure *client) {
 #endif
 
 
+/*
+ * Attempts to connect/reconnect to the MQTT broker.
+ * Mechanism: Throttled to one attempt per MQTTRECONNECTTIMER (30s). On connect, subscribes to
+ * commands/opentherm/gpio/raw topics, publishes LWT "Online" and IP address. On first connect
+ * (mqttReconnects==1), triggers a resend of all heatpump and 1-wire values.
+ * Thread-safety: Called only from mqttTask on core 1. No concurrent access to mqtt_client or
+ * heishamonSettings needs locking because only this task touches them.
+ * Data flow: Reads heishamonSettings (mqtt_server, mqtt_topic_base, etc.). Writes mqttReconnects,
+ * publishes via mqttPublishQueued. Subscribes via mqtt_client.subscribe.
+ */
 void mqtt_reconnect()
 {
   unsigned long now = millis();
@@ -487,17 +387,13 @@ void mqtt_reconnect()
       sprintf(topic, "%s/%s", heishamonSettings.mqtt_topic_base, mqtt_send_raw_value_topic);
       mqtt_client.subscribe(topic);
       sprintf(topic, "%s/%s", heishamonSettings.mqtt_topic_base, mqtt_willtopic);
-      mqtt_client.publish(topic, "Online");
+      mqttPublishQueued(topic, "Online", true);
       sprintf(topic, "%s/%s", heishamonSettings.mqtt_topic_base, mqtt_iptopic);
-#ifdef ESP8266
-      mqtt_client.publish(topic, WiFi.localIP().toString().c_str(), true);
-#else
       if (ETH.hasIP()) {
-        mqtt_client.publish(topic, ETH.localIP().toString().c_str(), true);
+        mqttPublishQueued(topic, ETH.localIP().toString().c_str(), true);
       } else {
-        mqtt_client.publish(topic, WiFi.localIP().toString().c_str(), true);
+        mqttPublishQueued(topic, WiFi.localIP().toString().c_str(), true);
       }
-#endif
 
       if (heishamonSettings.use_s0) { // connect to s0 topic to retrieve older watttotal from mqtt
         sprintf_P(mqtt_topic, PSTR("%s/%s/WatthourTotal/1"), heishamonSettings.mqtt_topic_base, mqtt_topic_s0);
@@ -535,6 +431,14 @@ void mqtt_reconnect()
 }
 
 #ifdef ESP32
+/*
+ * Briefly flashes the NeoPixel blue during an operation, then restores the previous state.
+ * Mechanism: status=true sets pixel to dim blue; status=false restores the running neoPixelState.
+ * Calls pixels.show() to commit.
+ * Thread-safety: Called from log_message() which can be invoked from any task. neoPixelState is
+ * read-only here. No locking; concurrent pixel writes are benign on single-LED strip.
+ * Data flow: Reads neoPixelState (running color). Writes to NeoPixel via pixels API.
+ */
 void blinkNeoPixel(bool status) {
   if (status) {
     pixels.setPixelColor(0, 0, 0, 16); //blue
@@ -546,6 +450,17 @@ void blinkNeoPixel(bool status) {
 #endif  
 
 
+/*
+ * Logs a timestamped message to serial, MQTT log topic, and websocket.
+ * Mechanism: Builds a string "[timestamp] (millis): message", writes to loggingSerial if
+ * heishamonSettings.logSerial1 is set, queues an MQTT publish if logMqtt is set, and sends a JSON
+ * websocket frame. Dynamically allocates/frees the formatted line.
+ * Thread-safety: Can be called from any task (loop, serialTXTask, mqttTask, etc.). Uses mqttPublish-
+ * Queued (thread-safe queue). Websocket writes are not locked — may interleave on concurrent calls.
+ * inSetup flag prevents blinkNeoPixel during boot to avoid watchdog issues.
+ * Data flow: Reads heishamonSettings (logSerial1, logMqtt). Writes to loggingSerial, mqttPublishQueue,
+ * websocket_write_all. Calls blinkNeoPixel (side-effect on NeoPixel).
+ */
 void log_message(char* string)
 {
 #ifdef ESP32
@@ -563,19 +478,11 @@ void log_message(char* string)
   if (heishamonSettings.logSerial1) {
     loggingSerial.println(log_line);
   }
-  if (heishamonSettings.logMqtt && mqtt_client.connected())
+  if (heishamonSettings.logMqtt)
   {
     char log_topic[256];
     sprintf(log_topic, "%s/%s", heishamonSettings.mqtt_topic_base, mqtt_logtopic);
-
-    if (!mqtt_client.publish(log_topic, log_line)) {
-      if (heishamonSettings.logSerial1) {
-        loggingSerial.print(millis());
-        loggingSerial.print(F(": "));
-        loggingSerial.println(F("MQTT publish log message failed!"));
-      }
-      mqtt_client.disconnect();
-    }
+    mqttPublishQueued(log_topic, log_line, false);
   }
   //send log message to websocket
   snprintf(log_line, len+12, "{\"logMsg\":\"%s (%lu): %s\"}", timestring, millis(), string);
@@ -586,6 +493,13 @@ void log_message(char* string)
 #endif  
 }
 
+/*
+ * Logs a hex dump of a byte array, 32 bytes per line, via log_message.
+ * Mechanism: Iterates through hex[] in LOGHEXBYTESPERLINE chunks, formats each as
+ * "XX XX XX ..." into a local buffer, then calls log_message().
+ * Thread-safety: Pure processing plus log_message call — same thread-safety as log_message.
+ * Data flow: Reads hex[] array. Writes via log_message.
+ */
 void logHex(char *hex, byte hex_len) {
 #define LOGHEXBYTESPERLINE 32  // please be aware of max mqtt message size
   for (int i = 0; i < hex_len; i += LOGHEXBYTESPERLINE) {
@@ -598,18 +512,56 @@ void logHex(char *hex, byte hex_len) {
   }
 }
 
+/*
+ * Convenience wrapper to publish a subtopic under a topic with the default retain setting.
+ * Mechanism: Delegates to the 4-argument mqttPublish with MQTT_RETAIN_VALUES.
+ * Thread-safety: Same as 4-argument mqttPublish (thread-safe via queue).
+ * Data flow: Forwards to mqttPublish(topic, subtopic, value, retain).
+ */
 void mqttPublish(char* topic, char* subtopic, char* value) {
   mqttPublish(topic, subtopic, value, MQTT_RETAIN_VALUES);
 }
 
+/*
+ * Queues an MQTT publish message for asynchronous transmission by mqttTask.
+ * Mechanism: Copies topic, payload, and retain flag into a mqttPublishMsg_t struct and sends it
+ * to the mqttPublishQueue FreeRTOS queue. Non-blocking (0 ticks wait).
+ * Thread-safety: Fully thread-safe via FreeRTOS queue. Can be called from any task.
+ * Data flow: Writes to mqttPublishQueue (consumed by mqttTask).
+ */
+void mqttPublishQueued(const char* topic, const char* payload, bool retain) {
+  if (mqttPublishQueue) {
+    mqttPublishMsg_t msg;
+    strlcpy(msg.topic, topic, sizeof(msg.topic));
+    strlcpy(msg.payload, payload, sizeof(msg.payload));
+    msg.retain = retain;
+    xQueueSend(mqttPublishQueue, &msg, 0);
+  }
+}
+
+/*
+ * Formats "topic_base/topic/subtopic" and queues the value for MQTT publish.
+ * Mechanism: Builds the full topic string from heishamonSettings.mqtt_topic_base and the provided
+ * topic/subtopic, then calls mqttPublishQueued with the given retain flag.
+ * Thread-safety: Thread-safe via mqttPublishQueued (FreeRTOS queue).
+ * Data flow: Reads heishamonSettings.mqtt_topic_base. Writes to mqttPublishQueue.
+ */
 void mqttPublish(char* topic, char* subtopic, char* value, bool retain) {
   char mqtt_topic[256];
   sprintf_P(mqtt_topic, PSTR("%s/%s/%s"), heishamonSettings.mqtt_topic_base, topic, subtopic);
-  mqtt_client.publish(mqtt_topic, value, retain);
+  mqttPublishQueued(mqtt_topic, value, retain);
 }
 
 
 
+/*
+ * Calculates the Panasonic heatpump checksum for a command.
+ * Mechanism: Sums all bytes, XORs the sum with 0xFF, then adds 1. The result is appended to
+ * each outbound frame. The receiver validates by summing all bytes including the checksum — the
+ * result must be 0.
+ * Thread-safety: Pure function with no shared state. Fully reentrant, safe from any task.
+ * Data flow: Reads command[] array. Returns computed byte.
+ */
 byte calcChecksum(byte* command, int length) {
   byte chk = 0;
   for ( int i = 0; i < length; i++)  {
@@ -619,6 +571,13 @@ byte calcChecksum(byte* command, int length) {
   return chk;
 }
 
+/*
+ * Validates the checksum of a received heatpump frame.
+ * Mechanism: Sums all bytes in the frame (payload + checksum byte). Returns true if the sum is 0,
+ * which is the Panasonic protocol's validity condition.
+ * Thread-safety: Pure function, no shared state. Safe from any task.
+ * Data flow: Reads check_data[] array. Returns bool.
+ */
 bool isValidReceiveChecksum(char* check_data, byte check_length) {
   byte chk = 0;
   for ( int i = 0; i < check_length; i++)  {
@@ -628,6 +587,19 @@ bool isValidReceiveChecksum(char* check_data, byte check_length) {
 }
 
 #ifdef ESP32
+/*
+ * Reads and processes data from the CZ-TAW1 proxy serial port.
+ * Mechanism: Accumulates bytes from proxySerial into proxydata[]. Validates header byte (must be
+ * 0x71/0x31/0xF1), length field, and checksum. On a complete valid frame: if it is a query from
+ * CZ-TAW1, replies with cached actData/actDataExtra or forwards to heatpump via send_command;
+ * startup messages (0x31) and unknown messages are forwarded.
+ * Thread-safety: Called from loop() on core 0. Accesses proxydata/proxydata_length, actData,
+ * actDataExtra (read). send_command is thread-safe via cmdQueue. No mutex for the data buffers,
+ * but serialTXTask on core 1 writes actData — potential read-vs-write race on actData. In practice
+ * the race window is very small and data is refreshed every waitTime seconds.
+ * Data flow: Reads proxySerial. Writes proxydata[], proxydata_length. Reads actData, actDataExtra.
+ * Calls send_command (writes cmdQueue). Writes to proxySerial for replies.
+ */
 void readProxy()
 {
   int proxylen = 0;
@@ -700,6 +672,21 @@ void readProxy()
 }
 #endif
 
+/*
+ * Reads and processes a complete frame from the heatpump serial port.
+ * Mechanism: Accumulates bytes from heatpumpSerial into data[]. After receiving at least 4 bytes,
+ * validates the header (sync bytes 0x71/0x31, byte 2 must be 0x01), length field, and checksum.
+ * On a complete valid frame of DATASIZE (203) bytes: if byte 3 is 0x10 it decodes the main data
+ * block via decode_heatpump_data; if 0x21 it decodes the extra block via decode_heatpump_data_extra.
+ * Frames of other sizes are forwarded to proxySerial or decoded as optional PCB data.
+ * Thread-safety: Called from loop()/readHeatpump() on core 0. Accesses data/data_length (global),
+ * sending (volatile), and various stat counters. sending is set by serialTXTask (core 1) and read
+ * here — the volatile qualifier ensures visibility. No mutex; relies on the fact that serialTXTask
+ * does not write data[] and readSerial does not modify sending except to clear it.
+ * Data flow: Reads heatpumpSerial. Writes data[], data_length, sending, stat counters (goodreads,
+ * badcrcread, etc.). Writes to actData/actDataExtra/actOptData via decode functions. Forwards
+ * unrecognized frames to proxySerial.
+ */
 bool readSerial()
 {
   int len = 0;
@@ -746,7 +733,7 @@ bool readSerial()
 
       if (data_length == DATASIZE)  {  //receive a full data block
         if  (data[3] == 0x10) { //decode the normal data block
-          decode_heatpump_data(data, actData, mqtt_client, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
+          decode_heatpump_data(data, actData, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
           if ( (!extraDataBlockAvailable) && ((actData[0] == 0x71) && (actData[0xc7] >= 3)) ) { //do we have valid header and byte 0xc7 is more or equal 3 then assume K&L and more series
             log_message(_F("Extra data available on this heatpump"));
             extraDataBlockAvailable = true; //request for extra data next run
@@ -762,7 +749,7 @@ bool readSerial()
           return true;
         } else if (data[3] == 0x21) { //decode the new model extra data block
           extraDataBlockAvailable = true; //set the flag to true so we know we can request this data always
-          decode_heatpump_data_extra(data, actDataExtra, mqtt_client, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
+          decode_heatpump_data_extra(data, actDataExtra, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
           #ifdef RAWDEBUG
           {
             char mqtt_topic[256];
@@ -773,29 +760,21 @@ bool readSerial()
           data_length = 0;
           return true;
         } else {
-#ifdef ESP8266
-          log_message(_F("Received an unknown full size datagram. Can't decode this yet."));
-#else 
           log_message(_F("Received a full size datagram but not for me. Forwarding to proxy port."));
           proxySerial.write(data,data_length);
-#endif               
           data_length = 0;
           return false;
         }
       }
       else if (data_length == OPTDATASIZE ) { //optional pcb acknowledge answer
         log_message(_F("Received optional PCB ack answer. Decoding this in OPT topics."));
-        decode_optional_heatpump_data(data, actOptData, mqtt_client, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
+        decode_optional_heatpump_data(data, actOptData, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
         data_length = 0;
         return true;
       }
       else {
-#ifdef ESP8266
-        log_message(_F("Received a shorter datagram. Can't decode this yet."));
-#else
         log_message(_F("Received a shorter datagram but not for me. Forwarding to proxy port."));
         proxySerial.write(data,data_length);
-#endif           
         data_length = 0;
         return false;
       }
@@ -804,6 +783,15 @@ bool readSerial()
   return false;
 }
 
+/*
+ * Pops and sends the next buffered command when the serial line is idle (non-ESP32 path).
+ * Mechanism: If sending is false and cmdnrel > 0, calls send_command with the oldest entry in the
+ * circular buffer, then advances cmdstart and decrements cmdnrel.
+ * Thread-safety: Called from loop() on non-ESP32 builds. sending is volatile, cmdnrel/cmdstart/
+ * cmdbuffer are static. No locking — single-threaded access on non-ESP32.
+ * Data flow: Reads sending, cmdnrel, cmdbuffer[cmdstart]. Calls send_command (writes to serial).
+ * Writes cmdstart, cmdnrel.
+ */
 void popCommandBuffer() {
   // to make sure we can pop a command from the buffer
   if ((!sending) && cmdnrel > 0) {
@@ -813,6 +801,14 @@ void popCommandBuffer() {
   }
 }
 
+/*
+ * Pushes a command into the circular command buffer for deferred transmission (non-ESP32 path).
+ * Mechanism: Checks buffer space, then copies the command bytes into cmdbuffer[cmdend] and advances
+ * cmdend / increments cmdnrel. Overwrites oldest entry if full.
+ * Thread-safety: Called from send_command on non-ESP32 when sending is busy. Single-threaded
+ * context — no locking needed.
+ * Data flow: Reads/writes cmdbuffer[], cmdend, cmdnrel. Reads command[].
+ */
 void pushCommandBuffer(byte* command, int length) {
   if (cmdnrel + 1 > MAXCOMMANDSINBUFFER) {
     log_message(_F("Too much commands already in buffer. Ignoring this commands.\n"));
@@ -825,6 +821,23 @@ void pushCommandBuffer(byte* command, int length) {
 }
 
 #ifdef ESP32
+/*
+ * FreeRTOS task that manages all serial transmission to the heatpump.
+ * Mechanism: Runs an infinite loop with priority-ordered transmission:
+ *   1. (Highest) Optional PCB query every OPTIONALPCBQUERYTIME ms — sends the PCB frame, periodically
+ *      saves to flash.
+ *   2. Heatpump basic data query every waitTime seconds — sends panasonicQuery with 0x10 byte.
+ *   3. Heatpump extra data query every waitTime seconds (offset) — sends panasonicQuery with 0x21 byte.
+ *   4. (Lowest) User commands from cmdQueue.
+ * Each send sets sending=true and records sendCommandReadTime. If sending stays true longer than
+ * SERIALTIMEOUT+OPTIONALPCBQUERYTIME, it is force-cleared to prevent deadlock. Log messages are
+ * sent to logQueue instead of calling log_message directly (which could block).
+ * Thread-safety: Runs on core 1 (pinned). Accesses sending (volatile, shared with loop/readSerial),
+ * pcbQueue/cmdQueue (FreeRTOS queues, thread-safe), logQueue, heishamonSettings (read-only after
+ * setup). sending is the only shared-memory variable; all other communication is via queues.
+ * Data flow: Reads pcbQueue (PCB data), cmdQueue (user commands), heishamonSettings (timing).
+ * Writes heatpumpSerial, logQueue. Updates sending, sendCommandReadTime.
+ */
 void serialTXTask(void *pvParameters) {
   unsigned long lastPCBSendTime = 0;
   unsigned long lastHPSendTime = 0;
@@ -909,6 +922,100 @@ void serialTXTask(void *pvParameters) {
     vTaskDelay(1 / portTICK_PERIOD_MS);
   }
 }
+
+/*
+ * FreeRTOS task that handles the MQTT client loop and drains the publish queue.
+ * Mechanism: Runs an infinite loop calling mqtt_client.loop() to keep the TCP/TLS stack alive and
+ * process incoming subscriptions. If WiFi/Ethernet is up but MQTT is disconnected, calls
+ * mqtt_reconnect(). Drains all messages from mqttPublishQueue and publishes them.
+ * Thread-safety: Runs on core 1 (pinned). mqtt_client is exclusively accessed by this task.
+ * mqttPublishQueue is a FreeRTOS queue (multi-producer, single-consumer). No mutex needed.
+ * Data flow: Reads mqttPublishQueue, WiFi/ETH status. Writes to mqtt_client for publishes.
+ */
+void mqttTask(void *pvParameters) {
+  mqttPublishMsg_t msg;
+  for (;;) {
+    mqtt_client.loop();
+
+    if ((WiFi.isConnected() || ETH.connected()) && !mqtt_client.connected()) {
+      if (mqttReconnects > 0) log_message((char*)"Lost MQTT connection!");
+      if (strlen(heishamonSettings.mqtt_server) > 0) mqtt_reconnect();
+    }
+
+    while (xQueueReceive(mqttPublishQueue, &msg, 0) == pdTRUE) {
+      if (mqtt_client.connected()) {
+        mqtt_client.publish(msg.topic, msg.payload, msg.retain);
+      }
+    }
+
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+  }
+}
+
+/*
+ * FreeRTOS task that periodically processes Dallas 1-Wire temperature sensors.
+ * Mechanism: Runs every 100ms; if use_1wire is enabled, calls dallasLoop() which reads sensors and
+ * publishes values via mqttPublish (→ mqttPublishQueue).
+ * Thread-safety: Runs on core 1. heishamonSettings.use_1wire is read-only after setup. dallasLoop
+ * uses mqttPublish (thread-safe queue) and log_message (queue).
+ * Data flow: Reads heishamonSettings. Writes to mqttPublishQueue via dallasLoop.
+ */
+void dallasTask(void *pvParameters) {
+  for (;;) {
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    if (heishamonSettings.use_1wire) {
+      dallasLoop(log_message, heishamonSettings.mqtt_topic_base);
+    }
+  }
+}
+
+/*
+ * FreeRTOS task that periodically reads S0 pulse counter inputs.
+ * Mechanism: Runs every 100ms; if use_s0 is enabled, calls s0Loop() which reads pulse counts and
+ * publishes energy values via mqttPublish.
+ * Thread-safety: Runs on core 1. heishamonSettings (use_s0, s0Settings) is read-only after setup.
+ * s0Loop uses mqttPublish (thread-safe queue) and log_message.
+ * Data flow: Reads heishamonSettings.s0Settings. Writes to mqttPublishQueue via s0Loop.
+ */
+void s0Task(void *pvParameters) {
+  for (;;) {
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+    if (heishamonSettings.use_s0) {
+      s0Loop(log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.s0Settings);
+    }
+  }
+}
+
+/*
+ * FreeRTOS task that runs the OpenTherm protocol state machine.
+ * Mechanism: Runs every 10ms; if opentherm is enabled, calls HeishaOTLoop() which manages the
+ * OpenTherm master/slave communication, reads/writes actData, and publishes OT values via
+ * mqtt_client.
+ * Thread-safety: Runs on core 1. actData is shared with loop()/readSerial() on core 0 — potential
+ * read-vs-write race, but OT data is updated every waitTime seconds and the window is small.
+ * mqtt_client is also shared with mqttTask on core 1 — mqtt_client is NOT thread-safe. This is a
+ * known design limitation: otTask and mqttTask both call mqtt_client.publish concurrently without
+ * locking. In practice the ESP32 Arduino core's PubSubClient may tolerate this, but it can cause
+ * corruption.
+ * Data flow: Reads actData (heatpump decoded data), heishamonSettings. Writes to mqtt_client.
+ */
+void otTask(void *pvParameters) {
+  for (;;) {
+    vTaskDelay(10 / portTICK_PERIOD_MS);
+    if (heishamonSettings.opentherm) {
+      HeishaOTLoop(actData, mqtt_client, heishamonSettings.mqtt_topic_base);
+    }
+  }
+}
+
+/*
+ * Queues a command to be sent to the heatpump (ESP32 path).
+ * Mechanism: Copies the command into a cmdbuffer_t and sends it to cmdQueue for consumption by
+ * serialTXTask. If listenonly is true, the command is silently dropped.
+ * Thread-safety: Thread-safe via FreeRTOS queue. Can be called from any task (loop, mqtt_callback,
+ * web server, rules engine).
+ * Data flow: Reads heishamonSettings.listenonly. Writes to cmdQueue.
+ */
 bool send_command(byte* command, int length) {
   if ( heishamonSettings.listenonly ) {
     log_message(_F("Not sending this command. Heishamon in listen only mode!"));
@@ -923,6 +1030,15 @@ bool send_command(byte* command, int length) {
 
 #else
 
+/*
+ * Sends a command directly to the heatpump serial port (non-ESP32 path).
+ * Mechanism: If sending is already true (another command in flight), pushes the command into the
+ * circular buffer via pushCommandBuffer. Otherwise sets sending=true, calculates checksum, writes
+ * command + checksum to heatpumpSerial, and records sendCommandReadTime for timeout detection.
+ * Thread-safety: Called from loop() context only on non-ESP32 (single-core). No concurrent access.
+ * Data flow: Reads heishamonSettings.listenonly, sending. Writes heatpumpSerial, sending,
+ * sendCommandReadTime. Calls pushCommandBuffer on busy.
+ */
 bool send_command(byte* command, int length) {
   if ( heishamonSettings.listenonly ) {
     log_message(_F("Not sending this command. Heishamon in listen only mode!"));
@@ -947,6 +1063,21 @@ bool send_command(byte* command, int length) {
 }
 #endif
 
+/*
+ * MQTT subscription callback — processes incoming messages on subscribed topics.
+ * Mechanism: Parses the topic (strips base), dispatches to:
+ *   - mqtt_send_raw_value_topic: sends raw hex bytes via send_command
+ *   - mqtt_topic_s0: restores watthour total value, then unsubscribes
+ *   - mqtt_topic_commands: calls send_heatpump_command
+ *   - mqtt_topic_opentherm_read: calls mqttOTCallback
+ *   - mqtt_topic_gpio: calls mqttGPIOCallback
+ * Uses mqttcallbackinprogress flag to prevent re-entrant execution.
+ * Thread-safety: Called from mqtt_client.loop() in mqttTask on core 1. The mqttcallbackinprogress
+ * flag prevents re-entry from the same task (PubSubClient calls the callback synchronously during
+ * loop()). Not safe if multiple tasks called loop() — but only mqttTask does.
+ * Data flow: Reads topic, payload, heishamonSettings. Writes via send_command (→cmdQueue),
+ * restore_s0_Watthour, mqttOTCallback, mqttGPIOCallback.
+ */
 // Callback function that is called when a message has been pushed to one of your topics.
 void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   if (mqttcallbackinprogress) {
@@ -959,6 +1090,7 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       msg[i] = (char)payload[i];
     }
     msg[length] = '\0';
+    char cb_log_msg[64];
     char* topic_command = topic + strlen(heishamonSettings.mqtt_topic_base) + 1; //strip base plus seperator from topic
     if (strcmp(topic_command, mqtt_send_raw_value_topic) == 0)
     { // send a raw hex string
@@ -966,8 +1098,8 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
       rawcommand = (byte *) malloc(length);
       memcpy(rawcommand, msg, length);
 
-      sprintf_P(log_msg, PSTR("sending raw value"));
-      log_message(log_msg);
+      sprintf_P(cb_log_msg, PSTR("sending raw value"));
+      log_message(cb_log_msg);
       send_command(rawcommand, length);
       free(rawcommand);
     } else if (strncmp(topic_command, mqtt_topic_s0, strlen(mqtt_topic_s0)) == 0)  // this is a s0 topic, check for watthour topic and restore it
@@ -989,9 +1121,9 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     //use this to receive valid heishamon raw data from other heishamon to debug this OT code
 #ifdef RAWDEBUG
     } else if (strcmp((char*)"panasonic_heat_pump/raw/data", topic) == 0) {  // check for raw heatpump input
-      sprintf_P(log_msg, PSTR("Received raw heatpump data from MQTT"));
-      log_message(log_msg);
-      decode_heatpump_data(msg, actData, mqtt_client, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
+      sprintf_P(cb_log_msg, PSTR("Received raw heatpump data from MQTT"));
+      log_message(cb_log_msg);
+      decode_heatpump_data(msg, actData, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.updateAllTime);
       memcpy(actData, msg, DATASIZE);
 #endif
     } else if (strncmp(topic_command, mqtt_topic_opentherm_read, strlen(mqtt_topic_opentherm_read)) == 0)  {
@@ -1005,6 +1137,13 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
+/*
+ * Configures and starts the Arduino OTA (Over-The-Air update) service.
+ * Mechanism: Sets OTA port (8266), hostname from settings, password from settings, registers
+ * empty onStart/onEnd/onProgress/onError callbacks, then calls ArduinoOTA.begin().
+ * Thread-safety: Called once during setup on core 0. No concurrency.
+ * Data flow: Reads heishamonSettings.wifi_hostname, heishamonSettings.ota_password.
+ */
 void setupOTA() {
   // Port defaults to 8266
   ArduinoOTA.setPort(8266);
@@ -1030,6 +1169,24 @@ void setupOTA() {
 
 
 
+/*
+ * Web server callback — handles all HTTP request routing, argument processing, and response
+ * generation for the embedded web server.
+ * Mechanism: State machine driven by client->step:
+ *   REQUEST_METHOD  — detect POST for settings-saving routes
+ *   REQUEST_URI     — route to handler IDs (1=root, 20=json, 30=reboot, 40=debug, etc.)
+ *   ARGS            — process POST/GET arguments (settings save, commands, firmware upload, rules)
+ *   HEADER          — process headers (currently no-op)
+ *   WRITE           — generate HTTP response for each route (HTML, JSON, redirect, firmware)
+ *   CREATE_HEADER   — set response headers (Location, CORS)
+ *   CLOSE           — free per-request resources
+ * Thread-safety: Called from webserver_loop() in loop() on core 0. Accesses heishamonSettings,
+ * actData, actDataExtra, actOptData (read), LittleFS (filesystem writes). No locking; single-
+ * threaded by design (all web handling on core 0).
+ * Data flow: Reads heishamonSettings, actData, actDataExtra, actOptData, extraDataBlockAvailable.
+ * Writes heishamonSettings via saveSettings, LittleFS via firmware/rules/cert upload. Writes HTTP
+ * responses via webserver_send/webserver_send_content_P.
+ */
 int8_t webserver_cb(struct webserver_t *client, void *dat) {
   
 
@@ -1099,16 +1256,13 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             LittleFS.remove("/ca.tmp");
             File cf = LittleFS.open("/ca.tmp", "w");
             if (cf) {
-              client->userdata = new File(cf);
+              client->userdata = new File(std::move(cf));
             }
             new_ca_stored = true;
           }
 #endif
           } else if (strcmp_P((char *)dat, PSTR("/firmware")) == 0) {
             if (!Update.isRunning()) {
-#ifdef ESP8266
-              Update.runAsync(true);
-#endif
               if (!Update.begin((ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000)) {
                 Update.printError(loggingSerial);
                 return -1;
@@ -1328,15 +1482,6 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 110: {
               int ret = saveSettings(client, &heishamonSettings);
-              #ifdef ESP8266
-              if ((!heishamonSettings.opentherm) && (heishamonSettings.listenonly)) {
-                //make sure we disable TX to heatpump-RX using the mosfet so this line is floating and will not disturb cz-taw1
-                //does not work for opentherm version currently
-                digitalWrite(ENABLEPIN, LOW);
-              } else {
-                digitalWrite(ENABLEPIN, HIGH);
-              }
-              #else
               if (heishamonSettings.listenonly) {
                 digitalWrite(ENABLEPIN, LOW);
               } else {
@@ -1347,7 +1492,6 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
               } else {
                 digitalWrite(ENABLEOTPIN, HIGH);
               }
-              #endif
               switch (client->route) {
                 case 111: {
                     return settingsNewPassword(client, &heishamonSettings);
@@ -1422,6 +1566,7 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 180: {
               if (heishamonSettings.use_1wire) initDallasSensors(log_message, heishamonSettings.updataAllDallasTime, heishamonSettings.waitDallasTime, heishamonSettings.dallasResolution);
+              webserver_send(client, 200, (char *)"text/plain", 0);
             } break;            
           default: {
               webserver_send(client, 301, (char *)"text/plain", 0);
@@ -1499,10 +1644,25 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
   return 0;
 }
 
+/*
+ * Starts the embedded HTTP web server on port 80.
+ * Mechanism: Calls webserver_start() with port 80, the webserver_cb handler, and no TLS.
+ * Thread-safety: Called once during setup. Single-threaded.
+ * Data flow: Starts the web server (side-effect on network stack).
+ */
 void setupHttp() {
   webserver_start(80, &webserver_cb, 0);
 }
 
+/*
+ * Performs a factory reset: formats LittleFS, clears WiFi credentials, and enters an infinite
+ * LED blink loop.
+ * Mechanism: Formats the LittleFS filesystem (erases all settings/rules/certs), creates a fresh
+ * /heishamon boot marker, disconnects WiFi with persistent=false, then blinks the NeoPixel
+ * red↔blue forever. The device must be power-cycled afterwards.
+ * Thread-safety: Called from loop() on core 0. Not reentrant; never returns.
+ * Data flow: Writes LittleFS (format, create file). Writes WiFi (disconnect). Writes pixels.
+ */
 void factoryReset() {
     loggingSerial.println("Factory reset request detected, clearing config."); 
     LittleFS.format();
@@ -1514,17 +1674,6 @@ void factoryReset() {
     WiFi.persistent(false);
     loggingSerial.println("Config cleared. Please reset to configure this device...");
     //initiate debug led indication for factory reset
-#if defined(ESP8266)
-    pinMode(LEDPIN, FUNCTION_0); //set it as gpio
-    pinMode(LEDPIN, OUTPUT);
-    while (true) {
-      digitalWrite(LEDPIN, HIGH);
-      delay(100);
-      digitalWrite(LEDPIN, LOW);
-      delay(100);
-      yield();
-    }
-#else
     while (true) {
      delay(100);
      pixels.setPixelColor(0, 128, 0, 0);
@@ -1533,8 +1682,15 @@ void factoryReset() {
      pixels.setPixelColor(0, 0, 0, 128);
      pixels.show();
     }
-#endif
 }
+/*
+ * Detects a double-reset condition: if /doublereset exists on boot, triggers factoryReset().
+ * Mechanism: On boot, checks for the file /doublereset. If present, a previous boot did not
+ * complete normally (or the user reset twice quickly), so factoryReset is called. Otherwise,
+ * creates /doublereset as a marker that will be detected on the next boot.
+ * Thread-safety: Called once early in setup. Single-threaded.
+ * Data flow: Reads/writes LittleFS.
+ */
 void doubleResetDetect() {
   if (LittleFS.exists("/doublereset")) {
     factoryReset();
@@ -1543,86 +1699,99 @@ void doubleResetDetect() {
   doubleresetFile.close();
 }
 
+/*
+ * Initializes the logging serial port (USB CDC at 115200 baud) and NeoPixel LED.
+ * Mechanism: Starts loggingSerial at 115200, prints the version banner, initializes the NeoPixel
+ * on LEDPIN, sets initial red color and calls show().
+ * Thread-safety: Called once during setup. Single-threaded.
+ * Data flow: Writes to loggingSerial, pixels.
+ */
 void setupSerial() {
-#if defined(ESP8266)
-  //boot issue's first on normal serial
-  heatpumpSerial.begin(115200);
-  heatpumpSerial.flush();
-#endif
   if (heishamonSettings.logSerial1) { //settings are not loaded yet, this is the startup default
     loggingSerial.begin(115200);
-    //debug line on serial1 (D4, GPIO2)
 #ifdef ESP32
     delay(100); //to let USB CDC to be opened if necessary
 #endif    
-    loggingSerial.print(F("Starting debugging, version: "));
+    loggingSerial.print(F("HeishaMon version: "));
     loggingSerial.println(heishamon_version);
   }
-#if defined(ESP8266)
-  else {
-    pinMode(LEDPIN, FUNCTION_0); //set it as gpio
-  }
-#elif defined(ESP32)
+  loggingSerial.print(F("  NeoPixel..."));
   pixels.begin();
   pixels.clear();
   pixels.setPixelColor(0, 16, 0, 0);
-  pixels.show(); 
-#endif
+  pixels.show();
+  loggingSerial.println(F("OK"));
 }
 
+/*
+ * Configures the heatpump and proxy UARTs (9600 8E1) and sets up GPIO pins.
+ * Mechanism: Flushes and reconfigures heatpumpSerial (RX=18, TX=17) and proxySerial (RX=9, TX=8)
+ * to 9600 baud, 8 data bits, even parity, 1 stop bit. Calls setupGPIO, sets ENABLEPIN high (TX
+ * enabled) unless CZ-TAW1 is detected on the heatpump bus (then forces listen-only). Also
+ * configures ENABLEOTPIN for OpenTherm.
+ * Thread-safety: Called once during setup. Single-threaded.
+ * Data flow: Writes heatpumpSerial, proxySerial, GPIO pins (ENABLEPIN, ENABLEOTPIN). Reads
+ * heishamonSettings.listenonly. May set heishamonSettings.listenonly = true if CZ-TAW1 detected.
+ */
 void switchSerial() {
-#if defined(ESP8266)
-  loggingSerial.println(F("Switching serial to connect to heatpump. Look for debug on serial1 (GPIO2) and mqtt log topic."));
-  //serial to cn-cnt
-  heatpumpSerial.flush();
-  heatpumpSerial.end();
-  heatpumpSerial.begin(9600, SERIAL_8E1); //on normal tx/rx esp8266
-  heatpumpSerial.flush();
-  //swap to gpio13 (D7) and gpio15 (D8)
-  heatpumpSerial.swap();
-  //turn on GPIO's on tx/rx for opentherm part
-  pinMode(1, FUNCTION_3);
-  pinMode(3, FUNCTION_3);
-#elif defined(ESP32)
-  // need to create new serial startup config for ESP32
+  loggingSerial.print(F("  heatpumpSerial(9600 8E1 RX="));
+  loggingSerial.print(HEATPUMPRX);
+  loggingSerial.print(F(" TX="));
+  loggingSerial.print(HEATPUMPTX);
+  loggingSerial.print(F(")..."));
   heatpumpSerial.flush();
   heatpumpSerial.end();
   heatpumpSerial.begin(9600, SERIAL_8E1,HEATPUMPRX,HEATPUMPTX);
   heatpumpSerial.flush();
+  loggingSerial.println(F("OK"));
+
+  loggingSerial.print(F("  proxySerial(9600 8E1 RX="));
+  loggingSerial.print(PROXYRX);
+  loggingSerial.print(F(" TX="));
+  loggingSerial.print(PROXYTX);
+  loggingSerial.print(F(")..."));
   proxySerial.flush();
   proxySerial.end();
   proxySerial.begin(9600, SERIAL_8E1,PROXYRX,PROXYTX);
-  proxySerial.flush();  
-#endif
+  proxySerial.flush();
+  loggingSerial.println(F("OK"));
 
-  setupGPIO(heishamonSettings.gpioSettings); //switch extra GPIOs to configured mode
-
-  //mosfet output enable
+  loggingSerial.print(F("  GPIO setup..."));
+  setupGPIO(heishamonSettings.gpioSettings);
   pinMode(ENABLEPIN, OUTPUT);
   #if defined (ESP32)
-  //OT 24v booster disable from boot
   pinMode(ENABLEOTPIN, OUTPUT);
   digitalWrite(ENABLEOTPIN, LOW);
   #endif
+  loggingSerial.println(F("OK"));
 
-  //try to detect if cz-taw1 is connected in parallel
   if (!heishamonSettings.listenonly) {
     if (heatpumpSerial.available() > 0) {
-      log_message(_F("There is data on the line without asking for it. Switching to listen only mode."));
+      loggingSerial.println(F("  CZ-TAW1 detected, listen-only mode"));
       heishamonSettings.listenonly = true;
     }
     else {
-      //enable gpio15 after boot using gpio5 (D1) which enables the level shifter for the tx to panasonic
-      //do not enable if listen only to keep the line floating
       digitalWrite(ENABLEPIN, HIGH);
+      loggingSerial.println(F("  TX enabled"));
     }
+  } else {
+    loggingSerial.println(F("  listen-only mode (config)"));
   }
 }
 
+/*
+ * Configures the MQTT client: buffer, server, TLS (if enabled), and callback registration.
+ * Mechanism: Sets the PubSubClient buffer to 1024 bytes. On ESP32 with TLS_SUPPORT, loads the CA
+ * certificate from LittleFS /ca.pem if mqtt_tls_enabled is set, and attaches a WiFiClientSecure.
+ * Sets server address/port and registers mqtt_callback as the subscription handler.
+ * Thread-safety: Called once during setup. Single-threaded.
+ * Data flow: Reads heishamonSettings (mqtt_server, mqtt_port, mqtt_tls_enabled, etc.). Writes
+ * mqtt_client config. Reads LittleFS /ca.pem for TLS.
+ */
 void setupMqtt() {
   mqtt_client.setBufferSize(1024);
 #ifdef TLS_SUPPORT
-  mqtt_client.setSocketTimeout(8); mqtt_client.setKeepAlive(30); //fast timeout, any slower than 10s will block the main loop too long (8s might be even safer to avoid reboots on bad wifi); short keepalive may lead to problems with TLS
+  mqtt_client.setSocketTimeout(8); mqtt_client.setKeepAlive(30);
   if (heishamonSettings.mqtt_tls_enabled) {
     if (mqtt_tls_client == nullptr) {
         mqtt_tls_client = new WiFiClientSecure();
@@ -1635,20 +1804,41 @@ void setupMqtt() {
     mqtt_client.setClient(mqtt_wifi_client);
   }
   last_tls_enabled = heishamonSettings.mqtt_tls_enabled;
+  loggingSerial.print(F("TLS="));
+  loggingSerial.print(heishamonSettings.mqtt_tls_enabled);
 #else
-  mqtt_client.setSocketTimeout(10); mqtt_client.setKeepAlive(5); //fast timeout, any slower will block the main loop too long
+  mqtt_client.setSocketTimeout(10); mqtt_client.setKeepAlive(5);
 #endif
   mqtt_client.setServer(heishamonSettings.mqtt_server, atoi(heishamonSettings.mqtt_port));
   mqtt_client.setCallback(mqtt_callback);
+  loggingSerial.printf(" server=%s port=%s", heishamonSettings.mqtt_server, heishamonSettings.mqtt_port);
 }
 
+/*
+ * Creates FreeRTOS queues and tasks, and initializes optional hardware modules.
+ * Mechanism: 
+ *   - Creates pcbQueue (depth 1), cmdQueue (MAXCOMMANDSINBUFFER), logQueue (depth 4), 
+ *     mqttPublishQueue (MQTT_PUBLISH_QUEUE_LEN).
+ *   - Spawns pinned tasks on core 1: serialTXTask (8KB stack), mqttTask (6KB).
+ *   - Optionally spawns dallasTask (4KB), s0Task (4KB), otTask (4KB) based on settings.
+ *   - If optionalPCB is enabled, tries to load saved PCB data from flash into pcbQueue.
+ *   - If use_1wire, calls initDallasSensors.
+ *   - If use_s0, calls initS0Sensors.
+ * Thread-safety: Called once during setup on core 0. All queue and task creation is single-threaded.
+ * Data flow: Reads heishamonSettings (use_1wire, use_s0, opentherm, optionalPCB). Writes to
+ * FreeRTOS queues and creates tasks. Reads LittleFS for optional PCB data.
+ */
 void setupConditionals() {
 
 #ifdef ESP32
+  loggingSerial.print(F("  Queues..."));
   pcbQueue = xQueueCreate(1, OPTIONALPCBQUERYSIZE);
   cmdQueue = xQueueCreate(MAXCOMMANDSINBUFFER, sizeof(cmdbuffer_t));
   logQueue = xQueueCreate(4, LOG_MSG_SIZE);
-  
+  mqttPublishQueue = xQueueCreate(MQTT_PUBLISH_QUEUE_LEN, sizeof(mqttPublishMsg_t));
+  loggingSerial.println(F("OK"));
+
+  loggingSerial.print(F("  Tasks..."));
   xTaskCreatePinnedToCore(
     serialTXTask,
     "serialTXTask",
@@ -1657,36 +1847,101 @@ void setupConditionals() {
     1,
     NULL,
     1
-  );
+  ); // serialTXTask: manages periodic heatpump queries, optional PCB queries, and user commands via serial
+  loggingSerial.print(F("serialTXTask "));
+  xTaskCreatePinnedToCore(
+    mqttTask,
+    "mqttTask",
+    6144,
+    NULL,
+    1,
+    NULL,
+    1
+  ); // mqttTask: keeps MQTT connection alive, drains the publish queue
+  loggingSerial.print(F("mqttTask "));
+  if (heishamonSettings.use_1wire) {
+    xTaskCreatePinnedToCore(
+      dallasTask,
+      "dallasTask",
+     4096,
+      NULL,
+      1,
+      NULL,
+      1
+    ); // dallasTask: periodically reads Dallas 1-Wire temperature sensors and publishes values
+    loggingSerial.print(F("dallasTask "));
+  }
+  if (heishamonSettings.use_s0) {
+    xTaskCreatePinnedToCore(
+      s0Task,
+      "s0Task",
+      4096,
+      NULL,
+      1,
+      NULL,
+      1
+    ); // s0Task: periodically reads S0 pulse counter inputs and publishes energy values
+    loggingSerial.print(F("s0Task "));
+  }
+  if (heishamonSettings.opentherm) {
+    xTaskCreatePinnedToCore(
+      otTask,
+      "otTask",
+      4096,
+      NULL,
+      1,
+      NULL,
+      1
+    ); // otTask: runs the OpenTherm protocol state machine and publishes OT values
+    loggingSerial.print(F("otTask "));
+  }
+  loggingSerial.println(F("OK"));
 #endif
 
   //send_initial_query(); //maybe necessary but for now disable. CZ-TAW1 sends this query on boot
 
-  //load optional PCB data from flash
   if (heishamonSettings.optionalPCB) {
+    loggingSerial.print(F("  Optional PCB..."));
     if (loadOptionalPCB(optionalPCBQuery, OPTIONALPCBQUERYSIZE)) {
-      log_message(_F("Succesfully loaded optional PCB data from saved flash!"));
+      log_message(_F("Loaded optional PCB data from flash"));
     }
     else {
       log_message(_F("Failed to load optional PCB data from flash!"));
     }
 #ifdef ESP32
-    //insert on task queue
     xQueueOverwrite(pcbQueue, optionalPCBQuery);
-#else
-    delay(1500); //need 1.5 sec delay before sending first datagram
-    send_optionalpcb_query(); //send one datagram already at start
-    lastOptionalPCBRunTime = millis();
 #endif
+    loggingSerial.println(F("OK"));
   }
 
-  //these two after optional pcb because it needs to send a datagram fast after boot
-  if (heishamonSettings.use_1wire) initDallasSensors(log_message, heishamonSettings.updataAllDallasTime, heishamonSettings.waitDallasTime, heishamonSettings.dallasResolution);
-  if (heishamonSettings.use_s0) initS0Sensors(heishamonSettings.s0Settings);
+  if (heishamonSettings.use_1wire) {
+    loggingSerial.print(F("  Dallas 1-wire..."));
+    initDallasSensors(log_message, heishamonSettings.updataAllDallasTime, heishamonSettings.waitDallasTime, heishamonSettings.dallasResolution);
+    loggingSerial.println(F("OK"));
+  }
+  if (heishamonSettings.use_s0) {
+    loggingSerial.print(F("  S0 counters..."));
+    initS0Sensors(heishamonSettings.s0Settings);
+    loggingSerial.println(F("OK"));
+  }
 
 
 }
 
+/*
+ * Timer callback for scheduled/deferred operations (called from timerqueue_update in loop()).
+ * Mechanism: Positive timer IDs route to rules_timer_cb (user-defined rules engine). Negative
+ * timer IDs handle internal operations:
+ *   -1  → format LittleFS, disconnect WiFi, schedule reboot
+ *   -2  → ESP.restart()
+ *   -3  → (re)configure WiFi
+ *   -4  → parse /rules.new, apply or revert rules
+ *   -5  → resync NTP, reschedule in 24h
+ *   -6  → retry NTP sync every 5 min until success
+ * Thread-safety: Called from timerqueue_update in loop() on core 0. Single-threaded.
+ * Data flow: Reads LittleFS for rules/config. Writes LittleFS (format, rename). Calls ESP.restart,
+ * setupWifi, ntpReload, rules_parse, rules_boot.
+ */
 void timer_cb(int nr) {
   if (nr > 0) {
     rules_timer_cb(nr);
@@ -1753,6 +2008,26 @@ void timer_cb(int nr) {
 }
 
 
+/*
+ * Arduino setup() — initializes all hardware and software subsystems, then enters the main loop.
+ * Mechanism: Sequential initialization in this order:
+ *   1. Memory diagnostics, uptime tracking
+ *   2. Serial (logging + NeoPixel)
+ *   3. LittleFS filesystem — detect first boot / normal boot / migration
+ *   4. Load settings from config.json
+ *   5. WiFi station/AP mode
+ *   6. Ethernet (W5500, optional)
+ *   7. HTTP web server
+ *   8. MQTT client configuration
+ *   9. Switch serial ports to 9600 8E1 (heatpump + proxy)
+ *   10. Conditional modules: queues, tasks, optional PCB, 1-wire, S0
+ *   11. DNS captive portal
+ *   12. OpenTherm (if enabled)
+ *   13. Rules engine
+ *   14. Final: turn off NeoPixel, clear inSetup flag
+ * Thread-safety: Called once by the Arduino framework on core 0. Fully single-threaded.
+ * Data flow: Writes to all subsystems. Reads LittleFS for config and boot markers.
+ */
 void setup() {
   //first get total memory before we do anything
   getFreeMemory();
@@ -1762,173 +2037,150 @@ void setup() {
 
   inSetup = true;
 
-  setupSerial();
-
   loggingSerial.println();
   loggingSerial.println(F("--- HEISHAMON ---"));
   loggingSerial.println(F("starting..."));
 
+  loggingSerial.print(F("Starting serial..."));
+  setupSerial();
+  loggingSerial.println(F("OK"));
+
 #if defined(ESP32)
-  loggingSerial.printf("ESP32 PSRAM available: %s, size: %u bytes, free: %u bytes\n",
+  loggingSerial.printf("ESP32 PSRAM: %s, size: %u bytes, free: %u bytes\n",
                        psramFound() ? "yes" : "no",
                        ESP.getPsramSize(),
                        ESP.getFreePsram());
 #endif
 
-  //first boot check, to visually confirm good flash
-  //this also formats the littlefs if necessary
-#if defined(ESP8266)
-  if (LittleFS.begin()) {
-#else
-  loggingSerial.println(F("Starting littlefs..."));
+  loggingSerial.print(F("Starting LittleFS..."));
   if (LittleFS.begin(true)) {
-    loggingSerial.println(F("Started littlefs..."));
-#endif
-    loggingSerial.println(F("Checking littlefs for first boot..."));
     if (LittleFS.exists("/heishamon")) {
-      //normal boot
-      loggingSerial.println(F("Heishamon boot file exists, normal boot..."));
+      loggingSerial.println(F("OK (normal boot)"));
     } else if (LittleFS.exists("/config.json")) {
-      loggingSerial.println(F("Heishamon config file exists, create boot file..."));
-      //from old firmware, create file and then normal boot
       File startupFile = LittleFS.open("/heishamon", "w");
       startupFile.close();
+      loggingSerial.println(F("OK (migrated config)"));
     } else {
-      //first boot
-      loggingSerial.println(F("Heishamon boot file missing, first start..."));
+      loggingSerial.println(F("FIRST BOOT - creating boot file"));
       File startupFile = LittleFS.open("/heishamon", "w");
-      startupFile.close();    
-#if defined(ESP8266)
-      pinMode(LEDPIN, FUNCTION_0); //set it as gpio
-      pinMode(LEDPIN, OUTPUT);
-      while (true) {
-        digitalWrite(LEDPIN, HIGH);
-        delay(50);
-        digitalWrite(LEDPIN, LOW);
-        delay(50);
-        yield();
-      }
-#else
+      startupFile.close();
       while (true) {
         delay(50);
         pixels.setPixelColor(0, 128, 0, 0);
         pixels.show();
         delay(50);
         pixels.setPixelColor(0, 0, 0, 128);
-       pixels.show();
+        pixels.show();
       }
-#endif      
     }
+  } else {
+    loggingSerial.println(F("FAIL"));
   }
-  //double reset detect from start - removed, using boot button now
-  //loggingSerial.println(F("Check for double reset..."));
-  //doubleResetDetect();
 
-  pinMode(BOOTPIN,INPUT_PULLUP); //enable the boot switch to be used as an input after booting
+  loggingSerial.print(F("Starting boot pin..."));
+  pinMode(BOOTPIN,INPUT_PULLUP);
+  loggingSerial.println(F("OK"));
 
-  loggingSerial.println(F("Send current wifi info to serial..."));
+  loggingSerial.print(F("Starting WiFi diag..."));
   WiFi.printDiag(loggingSerial);
+  loggingSerial.println(F("OK"));
 
-  loggingSerial.println(F("Loading config from flash..."));
+  loggingSerial.print(F("Starting config load..."));
   loadSettings(&heishamonSettings);
+  loggingSerial.println(F("OK"));
 
-  loggingSerial.println(F("Setup wifi..."));
+  loggingSerial.print(F("Starting WiFi..."));
   setupWifi(&heishamonSettings);
   lastWifiRetryTimer = millis();
+  loggingSerial.println(F("OK"));
 
 #if defined(ESP32)
-  loggingSerial.println(F("Setup ethernet module..."));
+  loggingSerial.print(F("Starting Ethernet..."));
   setupETH();
+  loggingSerial.println(F("OK"));
 #endif
 
-  loggingSerial.println(F("Setup HTTP..."));
+  loggingSerial.print(F("Starting HTTP..."));
   setupHttp();
+  loggingSerial.println(F("OK"));
 
-  loggingSerial.println(F("Setup SNTP..."));
-#if defined(ESP8266)
-  sntp_stop();
-  sntp_setoperatingmode(SNTP_OPMODE_POLL);
-  sntp_init();
-#else
-  loggingSerial.println(F("SNTP setup deferred until network is up"));
-#endif
-
-  loggingSerial.println(F("Setup MQTT..."));
+  loggingSerial.print(F("Starting MQTT..."));
   setupMqtt();
+  loggingSerial.println(F("OK"));
 
-  loggingSerial.println(F("Switch serial..."));
-  switchSerial(); //switch serial to gpio13/gpio15
+  loggingSerial.print(F("Starting serial switch..."));
+  switchSerial();
+  loggingSerial.println(F("OK"));
 
-  loggingSerial.println(F("Sending new wifi diag..."));
-#if defined(ESP8266)
-  WiFi.printDiag(loggingSerial);
-#elif defined(ESP32)
-  // Avoid verbose printDiag here on ESP32-S3 core 3.x; keep startup log lightweight.
-  loggingSerial.printf("Mode: %d, AP stations: %d\n", WiFi.getMode(), WiFi.softAPgetStationNum());
-#endif
+  loggingSerial.printf("WiFi mode: %d, AP stations: %d\n", WiFi.getMode(), WiFi.softAPgetStationNum());
 
-  loggingSerial.println(F("Settings conditionals..."));
-  setupConditionals(); //setup for routines based on settings
+  loggingSerial.print(F("Starting conditionals..."));
+  setupConditionals();
+  loggingSerial.println(F("OK"));
 
-  loggingSerial.println(F("Settings DNS..."));
+  loggingSerial.print(F("Starting DNS..."));
   dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
   dnsServer.start(DNS_PORT, "*", apIP);
+  loggingSerial.println(F("OK"));
 
-  loggingSerial.println(F("Check OT config..."));
-  //OT begin must be after serial setup
   if (heishamonSettings.opentherm) {
-    #if defined(ESP8266)
-    //always enable mosfets if opentherm is used
-    digitalWrite(ENABLEPIN, HIGH);
-    #else
-    //dedicated OT enable pin on ESP32 model
+    loggingSerial.print(F("Starting OpenTherm..."));
     digitalWrite(ENABLEOTPIN, HIGH);
-    #endif
     HeishaOTSetup();
+    loggingSerial.println(F("OK"));
   }
 
-  loggingSerial.println(F("Enabling rules.."));
+  loggingSerial.print(F("Starting rules..."));
   if (heishamonSettings.force_rules == false) {
-#if defined(ESP8266)
-  rst_info *resetInfo = ESP.getResetInfoPtr();
-  loggingSerial.printf(PSTR("Reset reason: %d, exception cause: %d\n"), resetInfo->reason, resetInfo->exccause);
-    if (resetInfo->reason > 0 && resetInfo->reason < 4) {
-#elif defined(ESP32)
       esp_reset_reason_t reset_reason = esp_reset_reason();
-      loggingSerial.printf(PSTR("Reset reason: %d\n"), reset_reason);
-    if (reset_reason > 3 && reset_reason < 12) {  //is this correct for esp32?
-#endif  
-        loggingSerial.println("Not loading rules due to crash reboot!");
+      loggingSerial.printf("Reset reason: %d\n", reset_reason);
+    if (reset_reason > 3 && reset_reason < 12) {
+        loggingSerial.println("Skipping rules due to crash reboot");
     } else {
       rules_parse((char *)"/rules.txt");
       rules_boot();
+      loggingSerial.println(F("OK"));
     }
   } else {
     rules_parse((char *)"/rules.txt");
     rules_boot();
+    loggingSerial.println(F("OK"));
   }
 
-  delay(200); //small delay to allow double reset
+  delay(200);
   #ifdef ESP32
-  //turn off neopixel to indicate end of setup
   neoPixelState = pixels.Color(0,0,0);
   pixels.setPixelColor(0, neoPixelState);
-  pixels.show(); 
+  pixels.show();
   #endif
-  //end of setup, clear double reset flag
-  //loggingSerial.println(F("Clearing double reset flag.."));
-  //LittleFS.remove("/doublereset");  
-  //loggingSerial.println(F("End of setup.."));
 
   inSetup = false;
+  loggingSerial.println(F("--- SETUP COMPLETE ---"));
 }
 
+/*
+ * Sends the initial startup query to the heatpump to request data.
+ * Mechanism: Calls send_command() with initialQuery (defined in commands.h). Currently disabled
+ * in setupConditionals because the CZ-TAW1 already sends this query on boot.
+ * Thread-safety: Thread-safe via send_command (cmdQueue).
+ * Data flow: Reads initialQuery (PROGMEM). Writes to cmdQueue.
+ */
 void send_initial_query() {
   log_message(_F("Requesting initial start query"));
   send_command(initialQuery, INITIALQUERYSIZE);
 
 }
 
+/*
+ * Sends the periodic data query to the heatpump, including the extra data block if available.
+ * Mechanism: Calls send_command with panasonicQuery (main 0x10 data block). If
+ * extraDataBlockAvailable is true, also sends a modified query with byte 3 = 0x21 to request the
+ * extended data block (K/L series and newer), then restores byte 3 to 0x10.
+ * This function is kept for manual use but the periodic query is now handled by serialTXTask.
+ * Thread-safety: Thread-safe via send_command (cmdQueue). extraDataBlockAvailable is volatile and
+ * written by readSerial on core 0 — read here potentially from a different task context.
+ * Data flow: Reads panasonicQuery, extraDataBlockAvailable. Writes to cmdQueue.
+ */
 void send_panasonic_query() {
   log_message(_F("Requesting new panasonic data"));
   send_command(panasonicQuery, PANASONICQUERYSIZE);
@@ -1941,13 +2193,18 @@ void send_panasonic_query() {
   }
 }
 
-#ifdef ESP8266
-void send_optionalpcb_query() {
-  log_message(_F("Sending optional PCB data"));
-  send_command(optionalPCBQuery, OPTIONALPCBQUERYSIZE);
-}
-#endif
-
+/*
+ * Checks for serial read timeout and reads available heatpump serial data.
+ * Mechanism: If sending has been true for longer than SERIALTIMEOUT (2s) without receiving a
+ * complete frame, declares a timeout: increments timeout counter, clears data_length and sending
+ * flag so the next query can proceed. Then, if in listen-only mode OR sending is active and serial
+ * data is available, calls readSerial() to process incoming bytes.
+ * Thread-safety: Called from loop() on core 0. Accesses sending (volatile, shared with
+ * serialTXTask on core 1), sendCommandReadTime (volatile), data_length (shared with readSerial),
+ * heatpumpSerial. No mutex — relies on volatile for visibility of sending/sendCommandReadTime.
+ * Data flow: Reads sending, sendCommandReadTime, heatpumpSerial. Writes data_length, sending, stat
+ * counters (timeoutread, totalreads, tooshortread). Calls readSerial.
+ */
 void readHeatpump() {
   if (sending && ((unsigned long)(millis() - sendCommandReadTime) > SERIALTIMEOUT)) {
     log_message(_F("Previous read data attempt failed due to timeout!"));
@@ -1966,6 +2223,15 @@ void readHeatpump() {
   if ( (heishamonSettings.listenonly || sending) && (heatpumpSerial.available() > 0)) readSerial();
 }
 
+/*
+ * Monitors the boot button (BOOTPIN, GPIO 0) for a long press (>10s) to trigger factory reset.
+ * Mechanism: If the button is NOT pressed (pin high, pulled up), continuously updates
+ * bootButtonNotPressed to the current millis(). If the button IS pressed (pin low) for more than
+ * 10 seconds, calls factoryReset().
+ * Thread-safety: Called from loop() on core 0. Single-threaded. bootButtonNotPressed is only
+ * accessed here.
+ * Data flow: Reads BOOTPIN GPIO. Writes bootButtonNotPressed. Calls factoryReset on long press.
+ */
 void checkBootButton() {
   if (digitalRead(BOOTPIN)) { //true = 1, not pressed
     bootButtonNotPressed = millis();
@@ -1977,6 +2243,25 @@ void checkBootButton() {
   }
 }
 
+/*
+ * Arduino loop() — main supervisory loop running on core 0.
+ * Mechanism: Each iteration performs:
+ *   1. Check boot button for long-press factory reset
+ *   2. Web server loop (process HTTP requests)
+ *   3. WiFi/Ethernet connectivity management (check_wifi)
+ *   4. OTA handler
+ *   5. Read heatpump serial data (readHeatpump → readSerial)
+ *   6. Read proxy serial data (readProxy)
+ *   7. Drain logQueue (messages from FreeRTOS tasks)
+ *   8. Every waitTime seconds: log stats, publish to MQTT, update websocket, refresh LWT
+ *   9. Timer queue processing (timerqueue_update → timer_cb)
+ * Thread-safety: Runs on core 0 (Arduino loop task). Shares data with tasks on core 1 via
+ * volatile variables (sending, sendCommandReadTime) and FreeRTOS queues (logQueue). Uses delay(1)
+ * to feed the watchdog.
+ * Data flow: Coordinates all high-level subsystems — reads heatpump/proxy serial, publishes stats,
+ * maintains MQTT will message, processes timers. Reads/writes heishamonSettings, actData,
+ * proxydata, stat counters, log messages.
+ */
 void loop() {
   //check boot button state
   checkBootButton();
@@ -1988,12 +2273,6 @@ void loop() {
   check_wifi();
   // Handle OTA first.s
   ArduinoOTA.handle();
-
-  mqtt_client.loop();
-
-  if (heishamonSettings.opentherm) {
-    HeishaOTLoop(actData, mqtt_client, heishamonSettings.mqtt_topic_base);
-  }
 
   readHeatpump();
 
@@ -2007,71 +2286,23 @@ void loop() {
   }
 #endif
 
-#ifdef ESP8266
-  if ((!sending) && (cmdnrel > 0)) { //check if there is a send command in the buffer
-    log_message(_F("Sending command from buffer"));
-    popCommandBuffer();
-  }
-#endif
-
-  if (heishamonSettings.use_1wire) dallasLoop(mqtt_client, log_message, heishamonSettings.mqtt_topic_base);
-
-  if (heishamonSettings.use_s0) s0Loop(mqtt_client, log_message, heishamonSettings.mqtt_topic_base, heishamonSettings.s0Settings);
-
-#ifdef ESP8266
-//this only runs on ESP8266, the ESP32 does this in vTask
-  if ((!sending) && (!heishamonSettings.listenonly) && (heishamonSettings.optionalPCB) && ((unsigned long)(millis() - lastOptionalPCBRunTime) > OPTIONALPCBQUERYTIME) ) {
-    lastOptionalPCBRunTime = millis();
-    send_optionalpcb_query();
-    if ((unsigned long)(millis() - lastOptionalPCBSave) > (1000 * OPTIONALPCBSAVETIME)) {  // only save each 5 minutes
-      lastOptionalPCBSave = millis();
-      if (saveOptionalPCB(optionalPCBQuery, OPTIONALPCBQUERYSIZE)) {
-        log_message((char*)"Succesfully saved optional PCB data to flash!");
-      } else {
-        log_message((char*)"Failed to save optional PCB data to flash!");
-      }
-    }
-  }
-#endif
-
   // run the data query only each WAITTIME
   if ((unsigned long)(millis() - lastRunTime) > (1000 * heishamonSettings.waitTime)) {
     lastRunTime = millis();
-    //check mqtt
-  #ifdef ESP8266
-    if ( WiFi.isConnected() && (!mqtt_client.connected()) )
-  #else
-    if ( (WiFi.isConnected() || ETH.connected()) && (!mqtt_client.connected()) )
-  #endif
-    {
-      if (mqttReconnects > 0 ) log_message(_F("Lost MQTT connection!"));
-      if (strlen(heishamonSettings.mqtt_server) > 0) mqtt_reconnect();
-    }
 
 
     //log stats
     if (totalreads > 0 ) readpercentage = (((float)goodreads / (float)totalreads) * 100);
     String message;
-#ifdef ESP8266
-    message.reserve(384);
-#endif
     message += F("Heishamon stats: Uptime: ");
     char *up = getUptime();
     message += up;
     free(up);
     message += F(" ## Free memory: ");
     message += getFreeMemory();
-#if defined(ESP8266)
-    message += F("% ## Heap fragmentation: ");
-    message += ESP.getHeapFragmentation();
-    message += F("% ## Max free block: ");
-    message += ESP.getMaxFreeBlockSize();
-    message += F(" bytes ## Free heap: ");
-#elif defined(ESP32)
     message += F("% ## Free PSRAM: ");
     message += ESP.getFreePsram();
     message += F(" bytes ## Free heap: ");
-#endif
     message += ESP.getFreeHeap();
     message += F(" bytes ## Wifi: ");
     message += getWifiQuality();
@@ -2107,17 +2338,10 @@ void loop() {
     log_message((char*)message.c_str());
 
     String stats;
-#ifdef ESP8266
-    stats.reserve(384);
-#endif
     stats += F("{\"uptime\":");
     stats += String(millis());
     stats += F(",\"voltage\":");
-#if defined(ESP8266)
-    stats += ESP.getVcc() / 1024.0;
-#else
     stats += "3.3";
-#endif
     stats += F(",\"free memory\":");
     stats += getFreeMemory();
     stats += F(",\"free heap\":");
@@ -2143,16 +2367,12 @@ void loop() {
     stats += F(",\"version\":\"");
     stats += heishamon_version;
     stats += F("\",\"board\":\"");
-#ifdef ESP8266
-    stats += F("ESP8266");
-#else
     stats += F("ESP32");
-#endif
     stats += F("\",\"rules active\":");
     stats += nrrules;
     stats += F("}");
     sprintf_P(mqtt_topic, PSTR("%s/stats"), heishamonSettings.mqtt_topic_base);
-    mqtt_client.publish(mqtt_topic, stats.c_str(), MQTT_RETAIN_VALUES);
+    mqttPublishQueued(mqtt_topic, stats.c_str(), MQTT_RETAIN_VALUES);
 
     //websocket stats
 #ifdef ESP32
@@ -2183,20 +2403,10 @@ void loop() {
     
     websocket_write_all(log_msg, strlen(log_msg));        
 
-#ifdef ESP8266
-    //get new data
-    if (!heishamonSettings.listenonly) send_panasonic_query();
-#endif
-
     //Make sure the LWT is set to Online, even if the broker have marked it dead.
     sprintf_P(mqtt_topic, PSTR("%s/%s"), heishamonSettings.mqtt_topic_base, mqtt_willtopic);
-    mqtt_client.publish(mqtt_topic, "Online");
+    mqttPublishQueued(mqtt_topic, "Online", true);
 
-#ifdef ESP8266
-    if (WiFi.isConnected()) {
-      MDNS.announce();
-    }
-#endif
   }
 
   timerqueue_update();

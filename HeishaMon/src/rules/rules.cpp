@@ -6,10 +6,8 @@
   file, You can obtain one at http://mozilla.org/MPL/2.0/.
 */
 
-#if defined(ESP8266) || defined(ESP32)
-  #pragma GCC diagnostic ignored "-Wjump-misses-init"
-  #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
+#pragma GCC diagnostic ignored "-Wjump-misses-init"
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 
 #if !defined(ESP8266) && !defined(ESP32)
   #include <stdio.h>
@@ -77,11 +75,7 @@ typedef struct vm_vchar_t {
   uint8_t len;
   uint8_t ref;
   char *value;
-#if defined(ESP8266) || defined(ESP32)
 } __attribute__((packed, aligned(4))) vm_vchar_t;
-#else
-} __attribute__((aligned(4))) vm_vchar_t;
-#endif
 
 typedef struct vm_vptr_t {
   uint8_t type;
@@ -190,23 +184,16 @@ static void print_bytecode(struct rules_t *obj);
 #endif
 /*LCOV_EXCL_STOP*/
 
-#if !defined(ESP8266)
 /*LCOV_EXCL_START*/
 uint8_t mmu_set_uint8(void *ptr, uint8_t src) { *(uint8_t *)ptr = src; return src; }
 uint8_t mmu_get_uint8(void *ptr) { return *(uint8_t *)ptr; }
 uint16_t mmu_set_uint16(void *ptr, uint16_t src) { *(uint16_t *)ptr = src; return src; }
 uint16_t mmu_get_uint16(void *ptr) { return (*(uint16_t *)ptr); }
 /*LCOV_EXCL_STOP*/
-#endif
 
 typedef struct rule_timer_t {
-#if defined(ESP8266) || defined(ESP32)
   uint32_t first;
   uint32_t second;
-#else
-  struct timespec first;
-  struct timespec second;
-#endif
 } __attribute__((aligned(4))) rule_timer_t;
 
 static struct rule_stack_t *varstack = NULL;
@@ -422,9 +409,6 @@ static int16_t lexer_peek(char **text, uint16_t skip, uint8_t *type, uint16_t *s
   uint8_t loop = 1;
 
   while(loop) {
-#ifdef ESP8266
-    ESP.wdtFeed();;
-#endif
     *type = getval((*text)[i]);
     *start = i;
     *len = 0;
@@ -3078,9 +3062,6 @@ static int16_t rule_create(char **text, struct rules_t *obj) {
   pos = 0;
 
   while(loop) {
-#ifdef ESP8266
-    ESP.wdtFeed();
-#endif
 #ifdef DEBUG
     printf("%s %d %d %d %d %s\n", __FUNCTION__, __LINE__, depth, pos, getval(obj->bc.nrbytes), token_names[go].name);
 #endif
@@ -5389,11 +5370,7 @@ int8_t rule_initialize(struct pbuf *input, struct rules_t ***rules, uint8_t *nrr
   obj->name = NULL;
 
 /*LCOV_EXCL_START*/
-#if defined(ESP8266) || defined(ESP32)
   timestamp.first = micros();
-#else
-  clock_gettime(CLOCK_MONOTONIC, &timestamp.first);
-#endif
 /*LCOV_EXCL_STOP*/
 
   if(rule_prepare((char **)&input->payload, &bcsize, &heapsize, &varsize, &memsize, &newlen) == -1 ||
@@ -5417,20 +5394,11 @@ int8_t rule_initialize(struct pbuf *input, struct rules_t ***rules, uint8_t *nrr
   }
 
 /*LCOV_EXCL_START*/
-#if defined(ESP8266) || defined(ESP32)
   timestamp.second = micros();
 
   logprintf_P(F("rule #%d was prepared in %d microseconds"), mmu_get_uint8(&obj->nr), timestamp.second - timestamp.first);
-#else
-  clock_gettime(CLOCK_MONOTONIC, &timestamp.second);
-
-  printf("rule #%d was prepared in %.6f seconds\n", obj->nr,
-    ((double)timestamp.second.tv_sec + 1.0e-9*timestamp.second.tv_nsec) -
-    ((double)timestamp.first.tv_sec + 1.0e-9*timestamp.first.tv_nsec));
-#endif
 /*LCOV_EXCL_STOP*/
 
-#if defined(ESP8266) || defined(ESP32)
   if((heapsize % 4) != 0) {
     Serial.println("Rules bytecode not 4 byte aligned!");
     exit(-1);
@@ -5443,7 +5411,6 @@ int8_t rule_initialize(struct pbuf *input, struct rules_t ***rules, uint8_t *nrr
     Serial.println("Rules bytecode not 4 byte aligned!");
     exit(-1);
   }
-#endif
 
   {
     {
@@ -5510,13 +5477,9 @@ int8_t rule_initialize(struct pbuf *input, struct rules_t ***rules, uint8_t *nrr
 #endif
     }
 
-    /*LCOV_EXCL_START*/
-#if defined(ESP8266) || defined(ESP32)
-    timestamp.first = micros();
-#else
-    clock_gettime(CLOCK_MONOTONIC, &timestamp.first);
-#endif
-    /*LCOV_EXCL_STOP*/
+/*LCOV_EXCL_START*/
+  timestamp.first = micros();
+/*LCOV_EXCL_STOP*/
     if(rule_create((char **)&input->payload, obj) == -1) {
       if((*rules = (struct rules_t **)REALLOC(*rules, sizeof(struct rules_t **)*((*nrrules)))) == NULL) {
         OUT_OF_MEMORY
@@ -5530,7 +5493,6 @@ int8_t rule_initialize(struct pbuf *input, struct rules_t ***rules, uint8_t *nrr
     }
 
 /*LCOV_EXCL_START*/
-#if defined(ESP8266) || defined(ESP32)
     timestamp.second = micros();
 
     logprintf_P(F("rule #%d bytecode was created in %d microseconds"), getval(obj->nr), timestamp.second - timestamp.first);
@@ -5545,24 +5507,6 @@ int8_t rule_initialize(struct pbuf *input, struct rules_t ***rules, uint8_t *nrr
       (varstack->bufsize),
 	  varstack->nrbytes / sizeof(struct vm_vchar_t)
     );
-#else
-    clock_gettime(CLOCK_MONOTONIC, &timestamp.second);
-
-    printf("rule #%d bytecode was created in %.6f seconds\n", obj->nr,
-      ((double)timestamp.second.tv_sec + 1.0e-9*timestamp.second.tv_nsec) -
-      ((double)timestamp.first.tv_sec + 1.0e-9*timestamp.first.tv_nsec));
-
-    printf("bytecode: %d/%d, heap: %d/%d, stack: %d/%d bytes, varstack: %d/%d bytes\n",
-      getval(obj->bc.nrbytes),
-      getval(obj->bc.bufsize),
-      getval(obj->heap->nrbytes),
-      getval(obj->heap->bufsize),
-      ((stack == NULL) ? 0 : getval(stack->nrbytes)),
-      ((stack == NULL) ? 0 : getval(stack->bufsize)),
-      ((varstack->nrbytes == 0) ? 0 : varstack->nrbytes),
-      (varstack->bufsize)
-    );
-#endif
 /*LCOV_EXCL_STOP*/
 
     setval(input->len, getval(input->len) + newlen);
@@ -5595,11 +5539,7 @@ int8_t rule_initialize(struct pbuf *input, struct rules_t ***rules, uint8_t *nrr
 /*LCOV_EXCL_STOP*/
 
 /*LCOV_EXCL_START*/
-#if defined(ESP8266) || defined(ESP32)
   timestamp.first = micros();
-#else
-  clock_gettime(CLOCK_MONOTONIC, &timestamp.first);
-#endif
 /*LCOV_EXCL_STOP*/
 
   if(rule_run(obj, 1) == -1) {
@@ -5607,7 +5547,6 @@ int8_t rule_initialize(struct pbuf *input, struct rules_t ***rules, uint8_t *nrr
   }
 
 /*LCOV_EXCL_START*/
-#if defined(ESP8266) || defined(ESP32)
   timestamp.second = micros();
 
   logprintf_P(F("rule #%d was executed in %d microseconds"), getval(obj->nr), timestamp.second - timestamp.first);
@@ -5622,34 +5561,12 @@ int8_t rule_initialize(struct pbuf *input, struct rules_t ***rules, uint8_t *nrr
     (varstack->bufsize),
 	varstack->nrbytes / sizeof(struct vm_vchar_t)
   );
-#else
-  clock_gettime(CLOCK_MONOTONIC, &timestamp.second);
-
-  printf("rule #%d was executed in %.6f seconds\n", obj->nr,
-    ((double)timestamp.second.tv_sec + 1.0e-9*timestamp.second.tv_nsec) -
-    ((double)timestamp.first.tv_sec + 1.0e-9*timestamp.first.tv_nsec));
-
-  printf("bytecode: %d/%d, heap: %d/%d, stack: %d/%d bytes, varstack %d/%d bytes\n",
-    getval(obj->bc.nrbytes),
-    getval(obj->bc.bufsize),
-    getval(obj->heap->nrbytes),
-    getval(obj->heap->bufsize),
-    ((stack == NULL) ? 0 : getval(stack->nrbytes)),
-    ((stack == NULL) ? 0 : getval(stack->bufsize)),
-    ((varstack->nrbytes == 0) ? 0 : varstack->nrbytes),
-    (varstack->bufsize)
-  );
-#endif
 /*LCOV_EXCL_STOP*/
 
   if(stack != NULL) {
 /*LCOV_EXCL_START*/
     if((getval(stack->bufsize) % 4) != 0) {
-#if defined(ESP8266) || defined(ESP32)
       Serial.printf("Rules AST not 4 byte aligned!\n");
-#else
-      printf("Rules AST not 4 byte aligned!\n");
-#endif
       exit(-1);
 /*LCOV_EXCL_STOP*/
     }

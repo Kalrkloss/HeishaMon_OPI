@@ -2,21 +2,35 @@
 #include "commands.h"
 #include "s0.h"
 #include "rules.h"
+#include "mqtt_queue.h"
 
 #define MQTT_RETAIN_VALUES 1 // do we retain 1wire values?
 
 #define MINREPORTEDS0TIME 5000 // how often s0 Watts are reported (not faster than this)
 
-//global array for s0 data
+/* actS0Data — Global array of per-port S0 pulse counter state.
+   Each element holds watt, pulse counts, timestamps, etc.
+   Written by countPulse() (ISR context) and read by s0Loop() (task context).
+   Volatile prevents the compiler from caching values across ISR/task boundaries. */
 volatile s0DataStruct actS0Data[NUM_S0_COUNTERS];
 
-//global array for s0 Settings
+/* actS0Settings — Global array of per-port S0 sensor configuration.
+   Contains GPIO pin, pulses-per-kWh, pulse-width limits, low-power interval.
+   Written once by initS0Sensors(), read by countPulse() ISR and s0Loop().
+   Volatile ensures the ISR sees the configured values. */
 volatile s0SettingsStruct actS0Settings[NUM_S0_COUNTERS];
 
 
-//These are the interrupt routines. Make them as short as possible so we don't block main code
+/* lastEdgeS0 — Timestamp (millis) of the most recent GPIO edge per S0 port.
+   Used by countPulse() to compute pulse width for validation.
+   Written and read only inside the ISR; volatile because it is also inspected
+   for debug purposes from task context. */
 volatile unsigned long lastEdgeS0[NUM_S0_COUNTERS] = {0, 0};
-volatile bool badEdge[NUM_S0_COUNTERS] = {0, 0}; //two edges is a pulse, so store as bool
+/* badEdge — Tracks edge parity per S0 port for bad-pulse detection.
+   Toggled on every edge; reset to false when a valid pulse completes.
+   Two consecutive bad edges (i.e. badEdge == true on arrival of a new edge)
+   are counted as one bad pulse. Written/read only inside the ISR. */
+volatile bool badEdge[NUM_S0_COUNTERS] = {0, 0};
 
 //for debug
 /*
@@ -24,6 +38,36 @@ volatile bool badEdge[NUM_S0_COUNTERS] = {0, 0}; //two edges is a pulse, so stor
   volatile int allLastEdgeS0Index[2] = {0, 0};
 */
 
+/* countPulse() — Core S0 interrupt handler, invoked from GPIO ISR wrappers.
+ *
+ * Called (via onS0Pulse1Change / onS0Pulse2Change) on every rising or falling
+ * edge of the S0 pulse input. Validates the pulse width against the per-port
+ * min/max configuration, computes instantaneous watt from the inter-pulse
+ * interval, and maintains good/bad pulse statistics.
+ *
+ * Algorithm:
+ *   1. Compute curPulseWidth = now - lastEdgeS0[i].
+ *   2. If curPulseWidth is within [minimalPulseWidth, maximalPulseWidth]:
+ *        - If not the first pulse since boot, calculate:
+ *            watt = (3600000000 / pulseInterval) / ppkwh
+ *          (watts = (3600 kJ/kWh * 1000) / (interval in ms) / (pulses/kWh))
+ *        - Update lastPulse, increment pulses/pulsesTotal/goodPulses, update
+ *          running-average pulse width, and reset badEdge flag.
+ *   3. Otherwise (invalid width):
+ *        - If badEdge[i] was already set, count this as a bad pulse.
+ *        - Toggle badEdge[i] (so a pair of consecutive bad edges = one bad pulse).
+ *   4. Store newEdgeS0 in lastEdgeS0[i] for next invocation.
+ *
+ * Thread-safety:
+ *   Runs in ISR context (IRAM_ATTR — code placed in IRAM for reliable
+ *   execution without flash-cache stalls). Must be extremely fast: no
+ *   blocking calls, no I/O, minimal arithmetic.
+ *   All shared globals (actS0Data, actS0Settings, lastEdgeS0, badEdge) are
+ *   volatile to prevent compiler re-ordering or register-caching that would
+ *   break visibility between ISR and main task contexts.
+ *   The caller (s0Loop) uses noInterrupts()/interrupts() around critical
+ *   sections that must be atomic w.r.t. this ISR.
+ */
 IRAM_ATTR void countPulse(int i) {
   volatile unsigned long newEdgeS0 = millis();
   volatile unsigned long curPulseWidth = newEdgeS0 - lastEdgeS0[i];
@@ -56,15 +100,49 @@ IRAM_ATTR void countPulse(int i) {
   lastEdgeS0[i] = newEdgeS0; //store this edge time for next use
 }
 
+/* onS0Pulse1Change() — GPIO ISR for S0 port 1.
+ *
+ * Thin wrapper that immediately delegates to countPulse(0).
+ * Placed in IRAM (IRAM_ATTR) so the interrupt vector can be serviced
+ * without waiting for flash cache — critical for capturing narrow S0 pulses.
+ *
+ * Thread-safety: Pure ISR context. Must not block or perform I/O.
+ */
 IRAM_ATTR void onS0Pulse1Change() {
   countPulse(0); //port 1, index 0 of array
 }
 
+/* onS0Pulse2Change() — GPIO ISR for S0 port 2.
+ *
+ * Thin wrapper that immediately delegates to countPulse(1).
+ * Placed in IRAM (IRAM_ATTR) for low-latency pulse capture.
+ *
+ * Thread-safety: Pure ISR context. Must not block or perform I/O.
+ */
 IRAM_ATTR void onS0Pulse2Change() {
   countPulse(1); //port 2, index 1 of array
 }
 
 
+/* initS0Sensors() — Initialises S0 pulse counter hardware and configuration.
+ *
+ * Called once during system startup, before the FreeRTOS S0 task begins.
+ * For each of the NUM_S0_COUNTERS ports:
+ *   - Copies user-provided settings (ppkwh, pulse-width limits, lower-power
+ *     interval) into the volatile actS0Settings array.
+ *   - Configures the GPIO pin as INPUT_PULLUP.
+ *   - Attaches a CHANGE interrupt (onS0Pulse1Change / onS0Pulse2Change).
+ *   - Schedules the first MQTT report after MINREPORTEDS0TIME ms to avoid
+ *     a spurious high-watt reading immediately after boot.
+ *
+ * Thread-safety:
+ *   Called exactly once from the main setup() context. Not re-entrant.
+ *   Because attachInterrupt() globally enables the interrupt, actS0Settings
+ *   must be completely written before the ISR can fire — the volatile
+ *   qualifier guarantees the writes are visible to the IRAM-resident ISR.
+ *   The two TODO lines referencing direct GPIO-pin assignment are left as
+ *   legacy; currently the pins are hard-coded to DEFAULT_S0_PIN_1/2.
+ */
 void initS0Sensors(s0SettingsStruct s0Settings[]) {
   //setup s0 port 1
 
@@ -108,7 +186,43 @@ void restore_s0_Watthour(int s0Port, float watthour) {
 
 
 
-void s0Loop(PubSubClient &mqtt_client, void (*log_message)(char*), char* mqtt_topic_base, s0SettingsStruct s0Settings[]) {
+/* s0Loop() — Periodic FreeRTOS task that reads S0 counters and publishes data.
+ *
+ * Designed to run as a dedicated task. Iterates over all S0 ports and
+ * triggers a report when millis() exceeds actS0Data[i].nextReport.
+ *
+ * On each reporting cycle:
+ *   - Calculates calcMaxWatt, the maximum possible watt given the silence
+ *     since the last pulse (if no pulse arrived, watt must be <= this value).
+ *   - If watt is very low, enters "low-power" mode with a longer reporting
+ *     interval (lowerPowerInterval seconds); otherwise uses the standard
+ *     MINREPORTEDS0TIME interval.
+ *   - Clamps actS0Data[i].watt down if it exceeds calcMaxWatt (prevents
+ *     stale high readings after a load switch-off).
+ *   - Computes Watthour (delta since last report) and WatthourTotal (since
+ *     boot/restore) from pulse counts.
+ *   - Publishes via:
+ *       - MQTT (queued publish to avoid blocking the task on network I/O)
+ *       - WebSocket (JSON structure for live UI update)
+ *       - Rules engine events (s0#watt_N, s0#watthour_N, s0#watthourtotal_N)
+ *   - Logs pulses seen (good/bad counts, average pulse width) via log_message.
+ *   - Resets actS0Data[i].pulses to 0 under noInterrupts() protection.
+ *
+ * Thread-safety:
+ *   - Reads volatile actS0Data[i] and actS0Settings[i] which are written by
+ *     the GPIO ISR (countPulse). The volatile qualifier ensures the task
+ *     sees the latest ISR updates.
+ *   - The write actS0Data[i].pulses = 0 is guarded by noInterrupts() /
+ *     interrupts() to prevent the ISR from incrementing pulses while the
+ *     task is clearing it — otherwise pulses would be lost.
+ *   - mqttPublishQueued() is used instead of blocking publish() so the
+ *     task yields quickly and does not delay pulse counting.
+ *   - websocket_write_all() and rules_event_cb() are assumed thread-safe
+ *     in this context (or internally synchronised).
+ *   - log_message is a caller-provided callback; assumed non-blocking or
+ *     fast enough not to disturb interrupt latency.
+ */
+void s0Loop(void (*log_message)(char*), char* mqtt_topic_base, s0SettingsStruct s0Settings[]) {
 
   unsigned long millisThisLoop = millis();
 
@@ -168,18 +282,18 @@ void s0Loop(PubSubClient &mqtt_client, void (*log_message)(char*), char* mqtt_to
       log_message(log_msg);
       sprintf(valueStr, "%.2f", Watthour);
       sprintf_P(mqtt_topic, PSTR("%s/%s/Watthour/%d"), mqtt_topic_base, mqtt_topic_s0, (i + 1));
-      mqtt_client.publish(mqtt_topic, valueStr, MQTT_RETAIN_VALUES);
+      mqttPublishQueued(mqtt_topic, valueStr, MQTT_RETAIN_VALUES);
 
       sprintf(log_msg, PSTR("Measured total Watthour on S0 port %d: %.2f"), (i + 1),  WatthourTotal );
       log_message(log_msg);
       sprintf(valueStr, "%.2f", WatthourTotal);
       sprintf(mqtt_topic, PSTR("%s/%s/WatthourTotal/%d"), mqtt_topic_base, mqtt_topic_s0, (i + 1));
-      mqtt_client.publish(mqtt_topic, valueStr, MQTT_RETAIN_VALUES);
+      mqttPublishQueued(mqtt_topic, valueStr, MQTT_RETAIN_VALUES);
       sprintf(log_msg, PSTR("Calculated Watt on S0 port %d: %u"), (i + 1), actS0Data[i].watt);
       log_message(log_msg);
       sprintf(valueStr, "%u",  actS0Data[i].watt);
       sprintf(mqtt_topic, PSTR("%s/%s/Watt/%d"), mqtt_topic_base, mqtt_topic_s0, (i + 1));
-      mqtt_client.publish(mqtt_topic, valueStr, MQTT_RETAIN_VALUES);
+      mqttPublishQueued(mqtt_topic, valueStr, MQTT_RETAIN_VALUES);
       //update GUI over websocket
       sprintf_P(log_msg, PSTR("{\"data\": {\"s0values\": {\"s0port\": %d, \"Watt\": %u, \"Watthour\": %.2f, \"WatthourTotal\": %.2f}}}"), i+1, actS0Data[i].watt,Watthour,WatthourTotal);
       websocket_write_all(log_msg, strlen(log_msg));         
@@ -195,6 +309,9 @@ void s0Loop(PubSubClient &mqtt_client, void (*log_message)(char*), char* mqtt_to
   }
 }
 
+/* jsonPulses — Snapshot of actS0Data[i].pulsesTotal taken at each JSON output.
+   Used by s0JsonOutput() to compute delta Watthour between successive web UI
+   requests. Not touched by the ISR, so no volatile qualifier is needed. */
 unsigned long jsonPulses[NUM_S0_COUNTERS];
 
 void s0JsonOutput(struct webserver_t *client) {

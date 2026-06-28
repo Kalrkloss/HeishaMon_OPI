@@ -1,8 +1,4 @@
-#if defined(ESP8266)
-  #define FLASHPROG PROGMEM
-#else
-  #define FLASHPROG  // ESP32 ignores FLASHPROG, makes sure compiler uses the .rodata instead of .data for consts when confusing for PROGMEM
-#endif
+#define FLASHPROG  // ESP32 ignores FLASHPROG, makes sure compiler uses the .rodata instead of .data for consts when confusing for PROGMEM
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARED CSS
@@ -1535,108 +1531,6 @@ R"====(
 
 // server inserts tzDataOptions here, then settingsForm2 continues
 
-#ifdef ESP8266
-static const char settingsForm2[] FLASHPROG = R"====(
-      </select>
-    </div>
-  </div></div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>Polling</h3></div>
-  <div class='settings-grid'>
-    <div class='setting-row'>
-      <label class='setting-label'>Heatpump poll interval</label>
-      <div style='display:flex;align-items:center;gap:8px'>
-        <input type='number' name='waitTime' class='setting-input' value='' style='width:80px'>
-        <span class='setting-hint'>seconds (min 5)</span>
-      </div>
-    </div>
-    <div class='setting-row'>
-      <label class='setting-label'>MQTT retransmit interval</label>
-      <div style='display:flex;align-items:center;gap:8px'>
-        <input type='number' name='updateAllTime' class='setting-input' value='' style='width:80px'>
-        <span class='setting-hint'>seconds</span>
-      </div>
-    </div>
-  </div></div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>Behavior</h3></div>
-  <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>WiFi hotspot when disconnected</label><div class='checkbox-wrap'><input type='checkbox' name='hotspot' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Debug log to MQTT from start</label><div class='checkbox-wrap'><input type='checkbox' name='logMqtt' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Debug hexdump from start</label><div class='checkbox-wrap'><input type='checkbox' name='logHexdump' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Debug log to serial1 (GPIO2)</label><div class='checkbox-wrap'><input type='checkbox' name='logSerial1' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Emulate optional PCB</label><div class='checkbox-wrap'><input type='checkbox' name='optionalPCB' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Enable Opentherm processing</label><div class='checkbox-wrap'><input type='checkbox' name='opentherm' value='enabled'></div></div>
-    <div class='setting-row'><label class='setting-label'>Force load rules on boot</label><div style='display:flex;align-items:center;gap:10px'><div class='checkbox-wrap'><input type='checkbox' name='force_rules' value='enabled'></div><span class='setting-hint' style='display:block;margin-top:4px'>Rules load normally, but skip after crashes to prevent boot loops. Enable to override.</span></div></div>
-  </div></div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>Listen Only</h3></div>
-  <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Listen only (parallel CZ-TAW1)</label><div class='checkbox-wrap'><input type='checkbox' name='listenonly' value='enabled'></div></div>
-  </div></div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>1-Wire DS18B20</h3></div>
-  <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Use 1-Wire DS18B20</label><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideDallasTable(this)' name='use_1wire' value='enabled'></div></div>
-  </div>
-  <div id='dallassettings' style='display:none'>
-  <div class='settings-grid'>
-    <div class='setting-row'>
-      <label class='setting-label'>1-Wire poll interval</label>
-      <div style='display:flex;align-items:center;gap:8px'>
-        <input type='number' name='waitDallasTime' class='setting-input' value='' style='width:80px'>
-        <span class='setting-hint'>seconds (min 5)</span>
-      </div>
-    </div>
-    <div class='setting-row'>
-      <label class='setting-label'>1-Wire MQTT retransmit</label>
-      <div style='display:flex;align-items:center;gap:8px'>
-        <input type='number' name='updataAllDallasTime' class='setting-input' value='' style='width:80px'>
-        <span class='setting-hint'>seconds</span>
-      </div>
-    </div>
-    <div class='setting-row'>
-      <label class='setting-label'>Temperature resolution</label>
-      <div class='radio-group'>
-        <label><input type='radio' id='9-bit' name='dallasResolution' value='9'> 9-bit</label>
-        <label><input type='radio' id='10-bit' name='dallasResolution' value='10'> 10-bit</label>
-        <label><input type='radio' id='11-bit' name='dallasResolution' value='11'> 11-bit</label>
-        <label><input type='radio' id='12-bit' name='dallasResolution' value='12'> 12-bit</label>
-      </div>
-    </div>
-  </div></div>
-  </div>
-  <div class='panel' style='margin-bottom:16px'>
-  <div class='panel-header'><h3>S0 kWh Metering</h3></div>
-  <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Use S0 kWh metering</label><div class='checkbox-wrap'><input type='checkbox' onclick='ShowHideS0Table(this)' name='use_s0' value='enabled'></div></div>
-  </div>
-  <div id='s0settings' style='display:none'>
-  <div class='settings-grid'>
-    <div class='setting-row'><label class='setting-label'>Port 1 imp/kWh</label><input type='number' id='s0_ppkwh_1' onchange='changeMinWatt(1)' name='s0_1_ppkwh' class='setting-input' value=''></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_1' onchange='changeMinWatt(1)' name='s0_1_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_1' name='s0_1_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_1' name='s0_1_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 1 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_1'>—</span> W</span></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 imp/kWh</label><input type='number' id='s0_ppkwh_2' onchange='changeMinWatt(2)' name='s0_2_ppkwh' class='setting-input' value=''></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 standby interval</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_interval_2' onchange='changeMinWatt(2)' name='s0_2_interval' class='setting-input' value='' style='width:80px'><span class='setting-hint'>seconds</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 min pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_minpulsewidth_2' name='s0_2_minpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 max pulse width</label><div style='display:flex;align-items:center;gap:8px'><input type='number' id='s0_maxpulsewidth_2' name='s0_2_maxpulsewidth' class='setting-input' value='' style='width:80px'><span class='setting-hint'>ms</span></div></div>
-    <div class='setting-row'><label class='setting-label'>Port 2 standby threshold</label><span style='font-size:12px;color:var(--text-muted)'><span id='s0_minwatt_2'>—</span> W</span></div>
-  </div></div>
-  </div>
-  <div class='form-actions'>
-    <button type='submit' class='btn btn-primary'>Save Settings</button>
-  </div>
-  </form>
-  <div style='padding:0 20px 24px'>
-    <a href='/factoryreset' class='btn btn-danger' onclick="return confirm('Are you sure? This will erase all configuration.')">Factory Reset</a>
-  </div>
-</div></div>
-)====";
-
-#else
-// ESP32 version of settingsForm2
 static const char settingsForm2[] FLASHPROG = R"====(
       </select>
     </div>
@@ -1736,7 +1630,6 @@ static const char settingsForm2[] FLASHPROG = R"====(
   </div>
 </div></div>
 )====";
-#endif
 
 // Populate settings form via /getsettings (unchanged logic)
 static const char populategetsettingsJS[] FLASHPROG = R"====(
@@ -2400,12 +2293,7 @@ static const char webBodySettingsResetPasswordWarning[] FLASHPROG = R"====(
 </div>
 )====";
 
-static const char webBodySettingsSaveMessage[] FLASHPROG = R"====(
-<div class='msg-box success'>
-  <h2>Settings Saved</h2>
-  <p>Configuration has been saved. The device is rebooting…</p>
-</div>
-)====";
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TIMEZONE DATA (unchanged — referenced by server)

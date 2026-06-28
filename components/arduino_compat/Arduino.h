@@ -146,7 +146,7 @@ inline void esp_restart_arduino() { esp_restart(); }
 // ---- PROGMEM / PSTR / F() ----
 #define PROGMEM
 #define PSTR(x) x
-#define _F(x) x
+#define _F(x) (char*)(x)
 #define F(x) x
 #define FPSTR(x) x
 #define PGM_P const char *
