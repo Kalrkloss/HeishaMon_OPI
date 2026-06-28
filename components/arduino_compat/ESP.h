@@ -3,6 +3,9 @@
 #include <stdint.h>
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_psram.h"
+
+inline bool psramFound() { return esp_psram_is_initialized(); }
 
 struct rst_info {
     uint32_t reason;
@@ -32,6 +35,7 @@ public:
 
     uint32_t getVcc() { return 3300; }
     void wdtFeed() {}
+    void reset() { esp_restart(); }
 
 private:
     rst_info reset_info_ = {0};

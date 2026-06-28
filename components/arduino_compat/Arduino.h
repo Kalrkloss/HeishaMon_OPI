@@ -90,6 +90,7 @@ public:
     size_t write(uint8_t c) override;
     size_t write(const uint8_t* buf, size_t sz) override;
 
+    using Print::write;
     using Print::print;
     size_t print(const IPAddress& ip);
     using Print::println;

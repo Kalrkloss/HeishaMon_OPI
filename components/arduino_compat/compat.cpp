@@ -10,6 +10,7 @@
 #include "driver/uart.h"
 #include "IPAddress.h"
 #include <time.h>
+#include <mdns.h>
 
 // ---- GPIO implementation ----
 void pinMode(uint8_t pin, uint8_t mode) {
@@ -37,8 +38,38 @@ int digitalRead(uint8_t pin) {
 }
 
 // ---- Interrupt shim ----
-void attachInterrupt(uint8_t pin, voidFuncPtr callback, int mode) {}
-void detachInterrupt(uint8_t pin) {}
+static bool gpio_isr_installed = false;
+
+static gpio_int_type_t arduino_mode_to_idf(int mode) {
+    switch (mode) {
+        case 1: return GPIO_INTR_POSEDGE;
+        case 2: return GPIO_INTR_ANYEDGE;
+        case 3: return GPIO_INTR_NEGEDGE;
+        case 4: return GPIO_INTR_LOW_LEVEL;
+        case 5: return GPIO_INTR_HIGH_LEVEL;
+        default: return GPIO_INTR_DISABLE;
+    }
+}
+
+void attachInterrupt(uint8_t pin, voidFuncPtr callback, int mode) {
+    if (!gpio_isr_installed) {
+        gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+        gpio_isr_installed = true;
+    }
+    gpio_config_t conf = {
+        .pin_bit_mask = (1ULL << pin),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = arduino_mode_to_idf(mode),
+    };
+    gpio_config(&conf);
+    gpio_isr_handler_add((gpio_num_t)pin, (gpio_isr_t)callback, NULL);
+}
+
+void detachInterrupt(uint8_t pin) {
+    gpio_isr_handler_remove((gpio_num_t)pin);
+}
 
 // ---- Time config ----
 bool configTzTime(const char* tz, const char* server1, const char* server2, const char* server3) {
@@ -179,6 +210,18 @@ int Serial_::printf(const char* fmt, ...) {
     }
     va_end(args);
     return ret;
+}
+
+// ---- MDNSClass implementation ----
+bool MDNSClass::begin(const char* hostname) {
+    if (mdns_init() != ESP_OK) return false;
+    if (mdns_hostname_set(hostname) != ESP_OK) return false;
+    return true;
+}
+void MDNSClass::addService(const char* service, const char* proto, uint16_t port) {
+    char srv[64];
+    snprintf(srv, sizeof(srv), "_%s", service);
+    mdns_service_add(NULL, srv, proto, port, NULL, 0);
 }
 
 // ---- Global instances ----

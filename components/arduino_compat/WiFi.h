@@ -16,8 +16,10 @@ typedef enum {
     WL_DISCONNECTED    = 6
 } wl_status_t;
 
-// Arduino-specific WiFi constants (not conflicting with ESP-IDF)
-#define WIFI_AP_STA             3
+// Arduino WiFi mode constants (map to ESP-IDF enum values)
+#define WIFI_STA     WIFI_MODE_STA
+#define WIFI_AP      WIFI_MODE_AP
+#define WIFI_AP_STA  WIFI_MODE_APSTA
 #define WIFI_SCAN_FAILED        -1
 
 class WiFiClass {

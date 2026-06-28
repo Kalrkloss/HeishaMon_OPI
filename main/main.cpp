@@ -12,6 +12,9 @@
 
 static const char *TAG = "HeishaMon";
 
+void setup();
+void loop();
+
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "--- HEISHAMON --- starting...");
@@ -24,17 +27,9 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_LOGI(TAG, "ESP32-S3 PSRAM available: %s, size: %u bytes",
-             esp_psram_is_initialized() ? "yes" : "no",
-             esp_psram_get_size());
-
-    ESP_LOGI(TAG, "Free heap: %lu bytes", (unsigned long)esp_get_free_heap_size());
-    ESP_LOGI(TAG, "Free PSRAM: %lu bytes", (unsigned long)esp_get_free_internal_heap_size());
-
-    // TODO Phase 2+: port initialization from Arduino setup()
-    // setupSerial, loadSettings, setupWifi, setupHttp, setupMqtt, etc.
+    setup();
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        loop();
     }
 }

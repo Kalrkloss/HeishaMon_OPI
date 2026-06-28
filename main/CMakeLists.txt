@@ -28,6 +28,17 @@ set(RULES_SRCS
     "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/function.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/operator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/rules.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/max.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/min.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/coalesce.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/round.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/ceil.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/floor.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/concat.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/print.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/settimer.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/isset.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../HeishaMon/src/rules/functions/gpio.cpp"
 )
 
 set(OPENTHERM_SRCS
@@ -37,6 +48,7 @@ set(OPENTHERM_SRCS
 idf_component_register(
     SRCS
         main.cpp
+        heishamon_main.cpp
         ${HEISHAMON_SRCS}
         ${COMMON_SRCS}
         ${RULES_SRCS}

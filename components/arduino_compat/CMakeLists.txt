@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "compat.cpp" "OneWire.cpp" "DallasTemperature.cpp" "WiFi.cpp" "WiFiClient.cpp" "WiFiServer.cpp"
+    SRCS "compat.cpp" "Adafruit_NeoPixel.cpp" "ArduinoOTA.cpp" "OneWire.cpp" "DallasTemperature.cpp" "WiFi.cpp" "WiFiClient.cpp" "WiFiServer.cpp"
     INCLUDE_DIRS "."
     REQUIRES
         freertos
@@ -7,8 +7,13 @@ idf_component_register(
         esp_system
         esp_driver_gpio
         esp_driver_uart
+        esp_driver_rmt
         esp_wifi
         esp_netif
         esp_event
         lwip
+        mbedtls
+        app_update
+        esp_psram
+        espressif__mdns
 )

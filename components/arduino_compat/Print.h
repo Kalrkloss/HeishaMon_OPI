@@ -34,6 +34,7 @@ public:
     virtual size_t write(const uint8_t* buf, size_t sz) { return 0; }
     virtual size_t write(uint8_t c) { return 0; }
     size_t write(const char* s) { return write((const uint8_t*)s, strlen(s)); }
+    size_t write(const char* buf, size_t sz) { return write((const uint8_t*)buf, sz); }
 
     size_t print(const char* s) { return write(s); }
     size_t print(char c) { return write((uint8_t)c); }
