@@ -614,7 +614,7 @@ static int8_t rule_prepare(char **text,
   uint16_t *memsize, uint16_t *len) {
 
   uint16_t pos = 0, nrblocks = 0, tpos = 0;
-  uint16_t nrtokens = 0, l_func_pos = 0, l_lparen_pos = 0;
+  uint16_t nrtokens = 0, l_func_pos = UINT16_MAX, l_lparen_pos = 0;
   uint8_t ctx = 0, do_clear = 1;
   int8_t nrhooks = 0, do_test = 1;
   char current = 0, next = 0;

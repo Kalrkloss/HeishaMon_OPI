@@ -37,6 +37,7 @@
 bool send_command(byte* command, int length);
 #ifdef ESP32
 extern QueueHandle_t pcbQueue;
+extern portMUX_TYPE optPCBQueryMux;
 #endif
 
 extern int dallasDevicecount;
@@ -526,7 +527,7 @@ static int8_t vm_value_get(struct rules_t *obj) {
     }
     for(i=0;i<NUMBER_OF_OPT_TOPICS;i++) {
       char cpy[MAX_TOPIC_LEN];
-      memcpy_P(&cpy, topics[i], MAX_TOPIC_LEN);
+      memcpy_P(&cpy, optTopics[i], MAX_TOPIC_LEN);
       if(stricmp(cpy, (char *)&key[1]) == 0) {
         String dataValue = actOptData[0] == '\0' ? "" : getOptDataValue(actOptData, i);
         char *str = (char *)dataValue.c_str();
@@ -697,7 +698,9 @@ static int8_t vm_value_set(struct rules_t *obj) {
             uint16_t len = tmp.func(payload, log_msg);
             log_message(log_msg);
 #ifdef ESP32
+            portENTER_CRITICAL(&optPCBQueryMux);
             xQueueOverwrite(pcbQueue, optionalPCBQuery);
+            portEXIT_CRITICAL(&optPCBQueryMux);
 #endif
             break;
           }

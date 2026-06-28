@@ -1,5 +1,10 @@
 #include "commands.h"
 #include <LittleFS.h>
+#ifdef ESP32
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+extern portMUX_TYPE optPCBQueryMux;
+#endif
 
 //removed checksum from default query, is calculated in send_command
 byte initialQuery[] = {0x31, 0x05, 0x10, 0x01, 0x00, 0x00, 0x00};
@@ -1076,16 +1081,15 @@ unsigned int set_external_compressor_control(char *msg, unsigned char *cmd, char
 
 //start of optional pcb commands
 unsigned int set_byte_6(int val, int base, int bit, char *log_msg, const char *func) {
+  portENTER_CRITICAL(&optPCBQueryMux);
   unsigned char hex = (optionalPCBQuery[6] & ~(base << bit)) | (val << bit);
+  optionalPCBQuery[6] = hex;
+  portEXIT_CRITICAL(&optPCBQueryMux);
 
   {
     char tmp[256] = { 0 };
     snprintf_P(tmp, 255, PSTR("set optional pcb '%s' to state %d (result byte 6: %02x)"), func, val, hex);
     memcpy(log_msg, tmp, sizeof(tmp));
-  }
-
-  {
-    optionalPCBQuery[6] = hex;
   }
 
   return sizeof(optionalPCBQuery);
@@ -1103,7 +1107,9 @@ unsigned int set_byte_9(char *msg, char *log_msg) {
   }
 
   {
+    portENTER_CRITICAL(&optPCBQueryMux);
     optionalPCBQuery[9] = set_pcb_value;
+    portEXIT_CRITICAL(&optPCBQueryMux);
   }
   return sizeof(optionalPCBQuery);
 }
@@ -1167,7 +1173,9 @@ unsigned int set_demand_control(char *msg, char *log_msg) {
   }
 
   {
+    portENTER_CRITICAL(&optPCBQueryMux);
     optionalPCBQuery[14] = set_pcb_value;
+    portEXIT_CRITICAL(&optPCBQueryMux);
   }
 
   return sizeof(optionalPCBQuery);
@@ -1185,7 +1193,9 @@ unsigned int set_xxx_temp(char *msg, char *log_msg, int byte, const char *func) 
   }
 
   {
+    portENTER_CRITICAL(&optPCBQueryMux);
     optionalPCBQuery[byte] = temp2hex(temp);
+    portEXIT_CRITICAL(&optPCBQueryMux);
   }
 
   return sizeof(optionalPCBQuery);
@@ -1245,8 +1255,10 @@ void send_heatpump_command(char* topic, char *msg, bool (*send_command)(byte*, i
       if (strcmp(topic, tmp.name) == 0) {
         len = tmp.func(msg, log_msg);
         log_message(log_msg);
-#ifdef ESP32        
-       xQueueOverwrite(pcbQueue, optionalPCBQuery);
+#ifdef ESP32
+        portENTER_CRITICAL(&optPCBQueryMux);
+        xQueueOverwrite(pcbQueue, optionalPCBQuery);
+        portEXIT_CRITICAL(&optPCBQueryMux);
 #endif          
       }
     }

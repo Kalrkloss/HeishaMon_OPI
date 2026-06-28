@@ -4,7 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-#define MQTT_PUBLISH_QUEUE_LEN 16
+#define MQTT_PUBLISH_QUEUE_LEN 64
 
 /*
  * Struct holding a single MQTT publish message queued from one RTOS task

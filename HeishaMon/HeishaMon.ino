@@ -50,6 +50,11 @@ settingsStruct heishamonSettings; // Main settings struct, loaded from config.js
 uint32_t neoPixelState = 0; //running neoPixelState
 bool inSetup; //bool to check if still booting
 volatile bool sending = false; // mutex for sending data
+#ifdef ESP32
+portMUX_TYPE sendingMux = portMUX_INITIALIZER_UNLOCKED; // protects 'sending' across cores
+portMUX_TYPE actDataMux = portMUX_INITIALIZER_UNLOCKED; // protects actData/actDataExtra/actOptData
+portMUX_TYPE optPCBQueryMux = portMUX_INITIALIZER_UNLOCKED; // protects optionalPCBQuery
+#endif
 bool mqttcallbackinprogress = false; // mutex for processing mqtt callback
 
 bool extraDataBlockAvailable = false; // this will be set to true if, during boot, heishamon detects this heatpump has extra data block (like K and L series do)
@@ -471,7 +476,7 @@ void log_message(char* string)
   struct tm *timeinfo = localtime(&rawtime);
   char timestring[32];
   strftime(timestring, 32, "%c", timeinfo);
-  size_t len = strlen(string) + strlen(timestring) + 32; //+32 long enough to contain millis() and the json part later for websocket mesg
+  size_t len = strlen(string) + strlen(timestring) + 64; //+64 long enough to contain millis() and the json part later for websocket mesg
   char* log_line = (char *) malloc(len);
   snprintf(log_line, len, "%s (%lu): %s", timestring, millis(), string);
 
@@ -485,7 +490,7 @@ void log_message(char* string)
     mqttPublishQueued(log_topic, log_line, false);
   }
   //send log message to websocket
-  snprintf(log_line, len+12, "{\"logMsg\":\"%s (%lu): %s\"}", timestring, millis(), string);
+  snprintf(log_line, len, "{\"logMsg\":\"%s (%lu): %s\"}", timestring, millis(), string);
   websocket_write_all(log_line, strlen(log_line));
   free(log_line);
 #ifdef ESP32
@@ -603,7 +608,8 @@ bool isValidReceiveChecksum(char* check_data, byte check_length) {
 void readProxy()
 {
   int proxylen = 0;
-  while ((proxySerial.available()) && ((proxydata_length + proxylen) < MAXDATASIZE)) {
+  int maxProxyBytes = 64; // cap per-call to avoid starving loop()
+  while ((proxySerial.available()) && ((proxydata_length + proxylen) < MAXDATASIZE) && (proxylen < maxProxyBytes)) {
     proxydata[proxydata_length + proxylen] = proxySerial.read(); //read available data and place it after the last received data
     proxylen++;
     if ((proxydata[0] != 0x71) and  (proxydata[0] != 0x31) and  (proxydata[0] != 0xF1)) { //wrong header received!
@@ -720,7 +726,13 @@ bool readSerial()
 
     if (data_length == (data[1] + 3)) { //we received all data (data[1] is header length field)
       sprintf_P(log_msg, PSTR("Received %d bytes data"), data_length); log_message(log_msg);
+#ifdef ESP32
+      portENTER_CRITICAL(&sendingMux);
       sending = false; //we received an answer after our last command so from now on we can start a new send request again
+      portEXIT_CRITICAL(&sendingMux);
+#else
+      sending = false;
+#endif
       if (heishamonSettings.logHexdump) logHex(data, data_length);
       if (! isValidReceiveChecksum(data, data_length) ) {
         log_message(_F("Checksum received false!"));
@@ -850,24 +862,35 @@ void serialTXTask(void *pvParameters) {
   for (;;) {
     unsigned long now = millis();
 
-    if (sending && ((unsigned long)(millis() - sendCommandReadTime) > (SERIALTIMEOUT + OPTIONALPCBQUERYTIME) )) {
-      //clear sending flag if taking too long so the optional pcb can still send regulary
-      //normally the flag would already be cleared by the readserial timeout but if that process hangs (wifi, mqtt issue) this check will free it anyways
+    // force-clear sending if the serial read has hung
+    portENTER_CRITICAL(&sendingMux);
+    if (sending && ((unsigned long)(now - sendCommandReadTime) > (SERIALTIMEOUT + OPTIONALPCBQUERYTIME))) {
       sending = false;
+    }
+    bool idle = !sending;
+    portEXIT_CRITICAL(&sendingMux);
+
+    if (!idle) {
+      vTaskDelay(1 / portTICK_PERIOD_MS);
+      continue;
     }
 
     // highest priority: optional PCB query every second
-    if ((!sending) && ((unsigned long)(now - lastPCBSendTime) >= OPTIONALPCBQUERYTIME)) {
+    if ((unsigned long)(now - lastPCBSendTime) >= OPTIONALPCBQUERYTIME) {
       lastPCBSendTime = now;
       if (heishamonSettings.optionalPCB && !heishamonSettings.listenonly) {
-        sending = true;
         sendCommandReadTime = now;
         xQueuePeek(pcbQueue, localPCBQuery, 0);
         byte chk = calcChecksum(localPCBQuery, OPTIONALPCBQUERYSIZE);
+        portENTER_CRITICAL(&sendingMux);
+        sending = true;
+        portEXIT_CRITICAL(&sendingMux);
         heatpumpSerial.write(localPCBQuery, OPTIONALPCBQUERYSIZE);
         heatpumpSerial.write(chk);
         sprintf_P(local_log_msg, PSTR("optional PCB datagram sent bytes: %d"), OPTIONALPCBQUERYSIZE + 1);
         xQueueSend(logQueue,local_log_msg,0);
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+        continue;
       }
       // save to flash periodically
       if ((unsigned long)(now - lastPCBSaveTime) >= (1000 * OPTIONALPCBSAVETIME)) {
@@ -877,45 +900,56 @@ void serialTXTask(void *pvParameters) {
     }
 
     // second priority: static heatpump query every waitTime seconds
-    if ((!sending) && (!heishamonSettings.listenonly)) {
+    if (!heishamonSettings.listenonly) {
       if ((unsigned long)(now - lastHPSendTime) >= (1000 * heishamonSettings.waitTime)) {
-        sending = true;
         sendCommandReadTime = now;
         lastHPSendTime = now;
         byte chk = calcChecksum(panasonicQuery, PANASONICQUERYSIZE);
+        portENTER_CRITICAL(&sendingMux);
+        sending = true;
+        portEXIT_CRITICAL(&sendingMux);
         heatpumpSerial.write(panasonicQuery, PANASONICQUERYSIZE);
         heatpumpSerial.write(chk);
         sprintf_P(local_log_msg, PSTR("heatpump request query sent bytes: %d"), PANASONICQUERYSIZE + 1);
-        xQueueSend(logQueue,local_log_msg,0);    
+        xQueueSend(logQueue,local_log_msg,0);
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+        continue;
       }
-    }
 
-    // third priority: extra data block query every waitTime seconds (offset from basic query)
-    if ((!sending) && (!heishamonSettings.listenonly) && extraDataBlockAvailable) {
-      if ((unsigned long)(now - lastHPExtraSendTime) >= (1000 * heishamonSettings.waitTime)) {
+      // third priority: extra data block query every waitTime seconds (offset from basic query)
+      if (extraDataBlockAvailable &&
+          ((unsigned long)(now - lastHPExtraSendTime) >= (1000 * heishamonSettings.waitTime))) {
         lastHPExtraSendTime = now;
-        sending = true;
         sendCommandReadTime = now;
         panasonicQuery[3] = 0x21;
         byte chk = calcChecksum(panasonicQuery, PANASONICQUERYSIZE);
+        portENTER_CRITICAL(&sendingMux);
+        sending = true;
+        portEXIT_CRITICAL(&sendingMux);
         heatpumpSerial.write(panasonicQuery, PANASONICQUERYSIZE);
         heatpumpSerial.write(chk);
         panasonicQuery[3] = 0x10;
         xQueueSend(logQueue, (void*)"heatpump extra query sent", 0);
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+        continue;
       }
-    }    
+    }
 
     // lowest priority: user commands from queue
-    if ((!sending) && (!heishamonSettings.listenonly)) {
+    if (!heishamonSettings.listenonly) {
       struct cmdbuffer_t cmd;
       if (xQueueReceive(cmdQueue, &cmd, 0) == pdTRUE) {
-        sending = true;
         sendCommandReadTime = now;
         byte chk = calcChecksum(cmd.data, cmd.length);
+        portENTER_CRITICAL(&sendingMux);
+        sending = true;
+        portEXIT_CRITICAL(&sendingMux);
         heatpumpSerial.write(cmd.data, cmd.length);
         heatpumpSerial.write(chk);
         sprintf_P(local_log_msg, PSTR("Command datagram sent bytes: %d"), cmd.length + 1);
-        xQueueSend(logQueue,local_log_msg,0);      
+        xQueueSend(logQueue,local_log_msg,0);
+        vTaskDelay(1 / portTICK_PERIOD_MS);
+        continue;
       }
     }
 
@@ -1000,10 +1034,14 @@ void s0Task(void *pvParameters) {
  * Data flow: Reads actData (heatpump decoded data), heishamonSettings. Writes to mqtt_client.
  */
 void otTask(void *pvParameters) {
+  char localActData[DATASIZE];
   for (;;) {
     vTaskDelay(10 / portTICK_PERIOD_MS);
     if (heishamonSettings.opentherm) {
-      HeishaOTLoop(actData, mqtt_client, heishamonSettings.mqtt_topic_base);
+      portENTER_CRITICAL(&actDataMux);
+      memcpy(localActData, actData, DATASIZE);
+      portEXIT_CRITICAL(&actDataMux);
+      HeishaOTLoop(localActData, mqtt_client, heishamonSettings.mqtt_topic_base);
     }
   }
 }
@@ -1082,10 +1120,15 @@ bool send_command(byte* command, int length) {
 void mqtt_callback(char* topic, byte* payload, unsigned int length) {
   if (mqttcallbackinprogress) {
     log_message(_F("Already processing another mqtt callback. Ignoring this one"));
+    return;
   }
-  else {
     mqttcallbackinprogress = true; //simple semaphore to make sure we don't have two callbacks at the same time
-    char msg[length + 1];
+    char* msg = (char*)malloc(length + 1);
+    if (msg == NULL) {
+      log_message(_F("OOM in mqtt_callback"));
+      mqttcallbackinprogress = false;
+      return;
+    }
     for (unsigned int i = 0; i < length; i++) {
       msg[i] = (char)payload[i];
     }
@@ -1132,9 +1175,9 @@ void mqtt_callback(char* topic, byte* payload, unsigned int length) {
     } else if (strncmp(topic_command, mqtt_topic_gpio, strlen(mqtt_topic_gpio)) == 0)  {
       char* topic_gpiocommand = topic_command + strlen(mqtt_topic_gpio) + 1; //strip the gpio subtopic from the topic
       mqttGPIOCallback(topic_gpiocommand, msg);
-    }    
+    }
+    free(msg);
     mqttcallbackinprogress = false;
-  }
 }
 
 /*
@@ -1308,12 +1351,17 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
             } break;
           case 100: {
               unsigned char cmd[256] = { 0 };
-              char cpy[args->len + 1];
+              char* cpy = (char*)malloc(args->len + 1);
+              if (cpy == NULL) {
+                loggingSerial.println(PSTR("OOM in webserver_cb case 100"));
+                client->route = 0;
+                return -1;
+              }
               char log_msg[256] = { 0 };
               unsigned int len = 0;
 
-              memset(&cpy, 0, args->len + 1);
-              snprintf((char *)&cpy, args->len + 1, "%.*s", args->len, args->value);
+              memset(cpy, 0, args->len + 1);
+              snprintf(cpy, args->len + 1, "%.*s", args->len, args->value);
 
               for (uint8_t x = 0; x < sizeof(commands) / sizeof(commands[0]); x++) {
                 cmdStruct tmp;
@@ -1351,11 +1399,14 @@ int8_t webserver_cb(struct webserver_t *client, void *dat) {
                     strcat((char *)client->userdata, "\n");
                     log_message(log_msg);
 #ifdef ESP32
+                    portENTER_CRITICAL(&optPCBQueryMux);
                     xQueueOverwrite(pcbQueue, optionalPCBQuery);
+                    portEXIT_CRITICAL(&optPCBQueryMux);
 #endif
                   }
                 }
               }
+              free(cpy);
             } break;
           case 110: {
               return cacheSettings(client, args);
@@ -1834,7 +1885,7 @@ void setupConditionals() {
   loggingSerial.print(F("  Queues..."));
   pcbQueue = xQueueCreate(1, OPTIONALPCBQUERYSIZE);
   cmdQueue = xQueueCreate(MAXCOMMANDSINBUFFER, sizeof(cmdbuffer_t));
-  logQueue = xQueueCreate(4, LOG_MSG_SIZE);
+  logQueue = xQueueCreate(16, LOG_MSG_SIZE);
   mqttPublishQueue = xQueueCreate(MQTT_PUBLISH_QUEUE_LEN, sizeof(mqttPublishMsg_t));
   loggingSerial.println(F("OK"));
 
@@ -1909,7 +1960,9 @@ void setupConditionals() {
       log_message(_F("Failed to load optional PCB data from flash!"));
     }
 #ifdef ESP32
+    portENTER_CRITICAL(&optPCBQueryMux);
     xQueueOverwrite(pcbQueue, optionalPCBQuery);
+    portEXIT_CRITICAL(&optPCBQueryMux);
 #endif
     loggingSerial.println(F("OK"));
   }
@@ -2218,7 +2271,13 @@ void readHeatpump() {
       tooshortread++;
     }
     data_length = 0; //clear any data in array
+#ifdef ESP32
+    portENTER_CRITICAL(&sendingMux);
     sending = false; //receiving the answer from the send command timed out, so we are allowed to send a new command
+    portEXIT_CRITICAL(&sendingMux);
+#else
+    sending = false;
+#endif
   }
   if ( (heishamonSettings.listenonly || sending) && (heatpumpSerial.available() > 0)) readSerial();
 }

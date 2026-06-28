@@ -37,18 +37,18 @@ void _logprintln(const char *file, unsigned int line, char *msg) {
 void _logprintf(const char *file, unsigned int line, char *fmt, ...) {
   char *str = NULL;
 
-  va_list ap, apcpy;
-  va_copy(apcpy, ap);
-  va_start(apcpy, fmt);
+  va_list ap;
+  va_start(ap, fmt);
 
-  int bytes = vsnprintf(NULL, 0, fmt, apcpy);
+  int bytes = vsnprintf(NULL, 0, fmt, ap);
 
-  va_end(apcpy);
+  va_end(ap);
   if((str = (char *)MALLOC(bytes+1)) == NULL) {
     OUT_OF_MEMORY
+    return;
   }
   va_start(ap, fmt);
-  vsprintf(str, fmt, ap);
+  vsnprintf(str, bytes+1, fmt, ap);
   va_end(ap);
 
   _logprintln(file, line, str);
@@ -76,23 +76,25 @@ void _logprintf_P(const char *file, unsigned int line, const char *fmt, ...) {
   char *foo = (char *)MALLOC(len+1);
   if(foo == NULL) {
     OUT_OF_MEMORY
+    return;
   }
   strcpy_P(foo, p);
 
   char *str = NULL;
 
-  va_list ap, apcpy;
-  va_copy(apcpy, ap);
-  va_start(apcpy, fmt);
+  va_list ap;
+  va_start(ap, fmt);
 
-  int bytes = vsnprintf(NULL, 0, foo, apcpy);
+  int bytes = vsnprintf(NULL, 0, foo, ap);
 
-  va_end(apcpy);
+  va_end(ap);
   if((str = (char *)MALLOC(bytes+1)) == NULL) {
     OUT_OF_MEMORY
+    FREE(foo);
+    return;
   }
   va_start(ap, fmt);
-  vsprintf(str, foo, ap);
+  vsnprintf(str, bytes+1, foo, ap);
   va_end(ap);
 
   _logprintln(file, line, str);

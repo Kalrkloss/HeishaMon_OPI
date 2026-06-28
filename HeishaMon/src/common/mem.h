@@ -12,7 +12,7 @@
 unsigned int alignedbytes(int v);
 unsigned int alignedbuffer(int v);
 
-#define OUT_OF_MEMORY while(0) { }
+#define OUT_OF_MEMORY abort();
 
 #define STRDUP strdup
 #define REALLOC realloc

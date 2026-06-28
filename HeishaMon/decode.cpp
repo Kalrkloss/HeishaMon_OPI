@@ -3,6 +3,12 @@
 #include "rules.h"
 #include "src/common/progmem.h"
 #include "mqtt_queue.h"
+#ifdef ESP32
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+extern portMUX_TYPE actDataMux;
+extern portMUX_TYPE optPCBQueryMux;
+#endif
 
 void websocket_write_all(char *data, uint16_t data_len);
 
@@ -335,7 +341,9 @@ void decode_heatpump_data(char* data, char* actData, void (*log_message)(char*),
       mqttPublishQueued(mqtt_topic, Topic_Value.c_str(), MQTT_RETAIN_VALUES);
     }
   }
+  portENTER_CRITICAL(&actDataMux);
   memcpy(actData, data, DATASIZE);
+  portEXIT_CRITICAL(&actDataMux);
   for (unsigned int Topic_Number = 0 ; Topic_Number < NUMBER_OF_TOPICS ; Topic_Number++) {
     if(updateTopic[Topic_Number]) {
       char log_msg[256];
@@ -396,7 +404,9 @@ void decode_heatpump_data_extra(char* data, char* actDataExtra, void (*log_messa
       mqttPublishQueued(mqtt_topic, Topic_Value.c_str(), MQTT_RETAIN_VALUES);
     }
   }
+  portENTER_CRITICAL(&actDataMux);
   memcpy(actDataExtra, data, DATASIZE);
+  portEXIT_CRITICAL(&actDataMux);
   for (unsigned int Topic_Number = 0 ; Topic_Number < NUMBER_OF_TOPICS_EXTRA ; Topic_Number++) {
     if(updateTopic[Topic_Number]) {
       char log_msg[256];
@@ -457,11 +467,15 @@ void decode_optional_heatpump_data(char* data, char* actOptData, void (*log_mess
   }
   //response to heatpump should contain the data from heatpump on byte 4 and 5
   byte valueByte4 = data[4];
-  optionalPCBQuery[4] = valueByte4;
   byte valueByte5 = data[5];
+  portENTER_CRITICAL(&optPCBQueryMux);
+  optionalPCBQuery[4] = valueByte4;
   optionalPCBQuery[5] = valueByte5;
+  portEXIT_CRITICAL(&optPCBQueryMux);
 
+  portENTER_CRITICAL(&actDataMux);
   memcpy(actOptData, data, OPTDATASIZE);
+  portEXIT_CRITICAL(&actDataMux);
   for (unsigned int Topic_Number = 0 ; Topic_Number < NUMBER_OF_OPT_TOPICS ; Topic_Number++) {
     if(updateTopic[Topic_Number]) {
       char log_msg[256];
